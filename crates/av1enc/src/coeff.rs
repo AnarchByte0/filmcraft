@@ -47,6 +47,37 @@ pub fn find_eob_4x4(quant: &[i16; 16]) -> usize {
     0
 }
 
+use crate::symbol::SymbolEncoder;
+
+/// Default CDF for transform block skip (`txb_skip`, Section 9.3).
+pub static DEFAULT_TXB_SKIP_CDF: [u16; 3] = [31849, 32768, 0];
+
+/// Default CDF for end-of-block pointer for 4x4 blocks (multisize 0).
+pub static DEFAULT_EOB_PT_16_CDF: [u16; 6] = [840, 1039, 1980, 4895, 32768, 0];
+
+/// Default CDF for eob extra bits.
+pub static DEFAULT_EOB_EXTRA_CDF: [u16; 3] = [16384, 32768, 0];
+
+/// Write a transform block skip flag (`txb_skip`).
+/// `all_zero = true` writes symbol 1, indicating all coefficients are zero.
+pub fn write_txb_skip(sym: &mut SymbolEncoder, all_zero: bool) {
+    sym.write_symbol_no_update(if all_zero { 1 } else { 0 }, &DEFAULT_TXB_SKIP_CDF);
+}
+
+/// Write EOB syntax for a 4x4 transform block into the symbol stream.
+pub fn write_eob_4x4(sym: &mut SymbolEncoder, eob: usize) {
+    debug_assert!((1..=16).contains(&eob));
+    let (pt_sym, extra_opt, lit_val, lit_bits) = map_eob_to_syntax(eob);
+    sym.write_symbol_no_update(pt_sym, &DEFAULT_EOB_PT_16_CDF);
+    if let Some(extra_sym) = extra_opt {
+        sym.write_symbol_no_update(extra_sym, &DEFAULT_EOB_EXTRA_CDF);
+    }
+    for i in (0..lit_bits).rev() {
+        let bit = ((lit_val >> i) & 1) == 1;
+        sym.write_bool(bit);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +117,14 @@ mod tests {
             }
             assert_eq!(decoded_eob, eob, "failed for eob {eob}");
         }
+    }
+
+    #[test]
+    fn test_write_txb_skip_and_eob() {
+        let mut sym = SymbolEncoder::new();
+        write_txb_skip(&mut sym, false);
+        write_eob_4x4(&mut sym, 4);
+        let bytes = sym.finish();
+        assert!(!bytes.is_empty());
     }
 }
