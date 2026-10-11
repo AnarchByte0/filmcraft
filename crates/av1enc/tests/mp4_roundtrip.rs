@@ -68,4 +68,36 @@ fn test_av1enc_mp4_mux_and_decode() {
     assert_eq!(decoded_pics[0].width, w);
     assert_eq!(decoded_pics[0].height, h);
     assert_eq!(decoded_pics[0].planes[0][0], 128);
+
+    let psnr = filmcraft_av1enc::compute_psnr_u16(&y_plane, &decoded_pics[0].planes[0]).unwrap();
+    assert_eq!(psnr, 100.0, "Identical flat plane must have infinite/100dB PSNR");
+}
+
+#[test]
+fn test_av1enc_mp4_mux_and_decode_gradient_psnr() {
+    let (w, h) = (128u32, 128u32);
+    let mut enc = Encoder::new(EncoderConfig::new(w, h, 30, 1)).unwrap();
+    let mut y_plane = vec![0u8; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            y_plane[(y * w + x) as usize] = (y * 2).min(255) as u8;
+        }
+    }
+    let uv_plane = vec![128u8; ((w / 2) * (h / 2)) as usize];
+    let frame = YuvFrame { y: &y_plane, u: &uv_plane, v: &uv_plane, y_stride: w as usize, uv_stride: (w / 2) as usize };
+
+    let p = enc.encode(&frame, 0).unwrap();
+    assert!(!p.data.is_empty());
+
+    let mut dec = filmcraft_av1::Decoder::new();
+    let mut pics = dec.decode(&p.data).unwrap();
+    pics.extend(dec.flush());
+    assert_eq!(pics.len(), 1);
+    assert_eq!(pics[0].width, w);
+    assert_eq!(pics[0].height, h);
+
+    let psnr = filmcraft_av1enc::compute_psnr_u16(&y_plane, &pics[0].planes[0]).unwrap();
+    // In baseline all-intra mode with skip=1 (no transform residuals), directional prediction
+    // approximates macro trends without high-frequency residual coefficients (typical PSNR ~10..15 dB).
+    assert!(psnr > 10.0, "Reconstruction PSNR should be > 10 dB, got {psnr:.2} dB");
 }

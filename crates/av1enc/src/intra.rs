@@ -147,20 +147,36 @@ pub fn sad_h(src: &[u8], src_stride: usize, w: usize, h: usize, left: &[u8]) -> 
 
 pub fn sad_smooth(src: &[u8], src_stride: usize, w: usize, h: usize, above: &[u8], left: &[u8]) -> u64 {
     let mut sad = 0u64;
-    let bot_left = left.get(h.saturating_sub(1)).copied().unwrap_or(128) as u32;
-    let top_right = above.get(w.saturating_sub(1)).copied().unwrap_or(128) as u32;
+    let Some(ab) = above.get(..w) else {
+        return u64::MAX;
+    };
+    let Some(lf) = left.get(..h) else {
+        return u64::MAX;
+    };
+    let bot_left = lf.last().copied().unwrap_or(128) as u32;
+    let top_right = ab.last().copied().unwrap_or(128) as u32;
+
+    // Precalculate horizontal wx weights and top-right terms once for up to 64x64 blocks.
+    let mut wx_terms = [(0u32, 0u32); 64];
+    for (x, slot) in wx_terms.iter_mut().take(w).enumerate() {
+        let wx = ((w - 1 - x) as u32 * 256) / (w as u32).max(1);
+        *slot = (wx, (256 - wx) * top_right);
+    }
+
     for y in 0..h {
         let wy = ((h - 1 - y) as u32 * 256) / (h as u32).max(1);
+        let term_bot_left = (256 - wy) * bot_left;
+        let p_left = lf[y] as u32;
         let row_start = y * src_stride;
         let Some(row) = src.get(row_start..row_start + w) else {
             continue;
         };
-        for x in 0..w {
-            let wx = ((w - 1 - x) as u32 * 256) / (w as u32).max(1);
-            let p_above = above.get(x).copied().unwrap_or(128) as u32;
-            let p_left = left.get(y).copied().unwrap_or(128) as u32;
-            let val = ((wy * p_above + (256 - wy) * bot_left + wx * p_left + (256 - wx) * top_right + 256) >> 9) as u8;
-            sad += row.get(x).copied().unwrap_or(0).abs_diff(val) as u64;
+
+        for (x, &px) in row.iter().enumerate() {
+            let (wx, term_top_right) = wx_terms[x];
+            let p_above = ab[x] as u32;
+            let val = ((wy * p_above + term_bot_left + wx * p_left + term_top_right + 256) >> 9) as u8;
+            sad += px.abs_diff(val) as u64;
         }
     }
     sad
@@ -168,15 +184,22 @@ pub fn sad_smooth(src: &[u8], src_stride: usize, w: usize, h: usize, above: &[u8
 
 pub fn sad_paeth(src: &[u8], src_stride: usize, w: usize, h: usize, above: &[u8], left: &[u8], top_left: u8) -> u64 {
     let mut sad = 0u64;
+    let Some(ab) = above.get(..w) else {
+        return u64::MAX;
+    };
+    let Some(lf) = left.get(..h) else {
+        return u64::MAX;
+    };
     let tl = top_left as i32;
+
     for y in 0..h {
-        let l = left.get(y).copied().unwrap_or(128) as i32;
+        let l = lf[y] as i32;
         let row_start = y * src_stride;
         let Some(row) = src.get(row_start..row_start + w) else {
             continue;
         };
-        for x in 0..w {
-            let a = above.get(x).copied().unwrap_or(128) as i32;
+        for (x, &px) in row.iter().enumerate() {
+            let a = ab[x] as i32;
             let base = a + l - tl;
             let pa = (base - a).abs();
             let pl = (base - l).abs();
@@ -188,7 +211,7 @@ pub fn sad_paeth(src: &[u8], src_stride: usize, w: usize, h: usize, above: &[u8]
             } else {
                 tl
             } as u8;
-            sad += row.get(x).copied().unwrap_or(0).abs_diff(p) as u64;
+            sad += px.abs_diff(p) as u64;
         }
     }
     sad
@@ -275,32 +298,57 @@ pub fn choose_best_intra_mode(src: &[u8], src_stride: usize, w: usize, h: usize,
 }
 
 fn predict_smooth(above: &[u8], left: &[u8], w: usize, h: usize, dst: &mut [u8], dst_stride: usize) {
-    let bot_left = left.get(h.saturating_sub(1)).copied().unwrap_or(128) as u32;
-    let top_right = above.get(w.saturating_sub(1)).copied().unwrap_or(128) as u32;
+    let Some(ab) = above.get(..w) else {
+        return;
+    };
+    let Some(lf) = left.get(..h) else {
+        return;
+    };
+    let bot_left = lf.last().copied().unwrap_or(128) as u32;
+    let top_right = ab.last().copied().unwrap_or(128) as u32;
+
+    let mut wx_terms = [(0u32, 0u32); 64];
+    for (x, slot) in wx_terms.iter_mut().take(w).enumerate() {
+        let wx = ((w - 1 - x) as u32 * 256) / (w as u32).max(1);
+        *slot = (wx, (256 - wx) * top_right);
+    }
+
     for y in 0..h {
         let wy = ((h - 1 - y) as u32 * 256) / (h as u32).max(1);
-        let row = &mut dst[y * dst_stride..y * dst_stride + w];
-        for x in 0..w {
-            let wx = ((w - 1 - x) as u32 * 256) / (w as u32).max(1);
-            let p_above = above[x] as u32;
-            let p_left = left[y] as u32;
-            row[x] = ((wy * p_above + (256 - wy) * bot_left + wx * p_left + (256 - wx) * top_right + 256) >> 9) as u8;
+        let term_bot_left = (256 - wy) * bot_left;
+        let p_left = lf[y] as u32;
+        let Some(row) = dst.get_mut(y * dst_stride..y * dst_stride + w) else {
+            continue;
+        };
+        for (x, slot) in row.iter_mut().enumerate() {
+            let (wx, term_top_right) = wx_terms[x];
+            let p_above = ab[x] as u32;
+            *slot = ((wy * p_above + term_bot_left + wx * p_left + term_top_right + 256) >> 9) as u8;
         }
     }
 }
 
 fn predict_paeth(above: &[u8], left: &[u8], top_left: u8, w: usize, h: usize, dst: &mut [u8], dst_stride: usize) {
+    let Some(ab) = above.get(..w) else {
+        return;
+    };
+    let Some(lf) = left.get(..h) else {
+        return;
+    };
     let tl = top_left as i32;
+
     for y in 0..h {
-        let l = left[y] as i32;
-        let row = &mut dst[y * dst_stride..y * dst_stride + w];
-        for x in 0..w {
-            let a = above[x] as i32;
+        let l = lf[y] as i32;
+        let Some(row) = dst.get_mut(y * dst_stride..y * dst_stride + w) else {
+            continue;
+        };
+        for (x, slot) in row.iter_mut().enumerate() {
+            let a = ab[x] as i32;
             let base = a + l - tl;
             let pa = (base - a).abs();
             let pl = (base - l).abs();
             let pc = (base - tl).abs();
-            row[x] = if pa <= pl && pa <= pc {
+            *slot = if pa <= pl && pa <= pc {
                 a
             } else if pl <= pc {
                 l

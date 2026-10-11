@@ -294,6 +294,39 @@ impl Encoder {
     }
 }
 
+/// Compute Mean Squared Error (MSE) between two byte planes of identical length.
+pub fn compute_mse(src: &[u8], dst: &[u8]) -> Option<f64> {
+    if src.is_empty() || src.len() != dst.len() {
+        return None;
+    }
+    let sum_sq_err: u64 = src.iter().zip(dst.iter()).map(|(&a, &b)| (a as i64 - b as i64).pow(2) as u64).sum();
+    Some(sum_sq_err as f64 / src.len() as f64)
+}
+
+/// Compute Peak Signal-to-Noise Ratio (PSNR in dB) between two 8-bit byte planes.
+///
+/// Returns 100.0 dB when planes are identical (zero error).
+pub fn compute_psnr(src: &[u8], dst: &[u8]) -> Option<f64> {
+    let mse = compute_mse(src, dst)?;
+    if mse <= 1e-10 {
+        return Some(100.0);
+    }
+    Some(10.0 * (255.0 * 255.0 / mse).log10())
+}
+
+/// Compute PSNR comparing an 8-bit reference plane with 16-bit decoder picture samples.
+pub fn compute_psnr_u16(src: &[u8], dst: &[u16]) -> Option<f64> {
+    if src.is_empty() || src.len() != dst.len() {
+        return None;
+    }
+    let sum_sq_err: u64 = src.iter().zip(dst.iter()).map(|(&a, &b)| (a as i64 - b as i64).pow(2) as u64).sum();
+    let mse = sum_sq_err as f64 / src.len() as f64;
+    if mse <= 1e-10 {
+        return Some(100.0);
+    }
+    Some(10.0 * (255.0 * 255.0 / mse).log10())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +488,22 @@ mod tests {
         let mut c = EncoderConfig::new(64, 64, 25, 1);
         c.key_int = 0;
         assert!(matches!(Encoder::new(c), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn test_quality_metrics_psnr_and_mse() {
+        let p1 = vec![128u8; 100];
+        let p2 = vec![128u8; 100];
+        assert_eq!(compute_mse(&p1, &p2), Some(0.0));
+        assert_eq!(compute_psnr(&p1, &p2), Some(100.0));
+
+        let p3 = vec![129u8; 100];
+        assert_eq!(compute_mse(&p1, &p3), Some(1.0));
+        let psnr = compute_psnr(&p1, &p3).unwrap();
+        // 10 * log10(255^2 / 1) ≈ 48.13 dB
+        assert!((psnr - 48.13).abs() < 0.1);
+
+        assert_eq!(compute_mse(&[], &[]), None);
+        assert_eq!(compute_mse(&[1], &[1, 2]), None);
     }
 }
