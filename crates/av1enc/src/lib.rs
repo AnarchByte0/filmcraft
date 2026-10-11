@@ -3,6 +3,7 @@
 //! Encodes conformant AV1 streams according to the AOMedia AV1 Specification v1.0.0.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+pub mod coeff;
 pub mod frame_header;
 pub mod intra;
 pub mod obu;
