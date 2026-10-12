@@ -2,7 +2,33 @@
 //! wasm32).
 
 #[cfg(feature = "threads")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+#[cfg(feature = "threads")]
+fn shared_pool(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
+    type Pools = Vec<(usize, Weak<rayon::ThreadPool>)>;
+    static POOLS: OnceLock<Mutex<Pools>> = OnceLock::new();
+    let registry = POOLS.get_or_init(|| Mutex::new(Vec::new()));
+    let existing = |pools: &Pools| pools.iter().find_map(|(n, pool)| if *n == threads { pool.upgrade() } else { None });
+    {
+        let mut pools = registry.lock().unwrap_or_else(|e| e.into_inner());
+        pools.retain(|(_, pool)| pool.strong_count() > 0);
+        if let Some(pool) = existing(&pools) {
+            return Some(pool);
+        }
+    }
+    // Build without holding the registry lock: unrelated decoders can keep starting.
+    let pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|i| format!("av1-{i}")).build().ok()?);
+    let mut pools = registry.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(pool) = existing(&pools) {
+        return Some(pool);
+    }
+    // Caching is optional. Weak entries neither retain idle threads nor grow without a bound.
+    if pools.len() < 16 && pools.try_reserve(1).is_ok() {
+        pools.push((threads, Arc::downgrade(&pool)));
+    }
+    Some(pool)
+}
 
 /// A handle to the decoder's worker pool (or none: run on the calling thread).
 #[derive(Clone, Default)]
@@ -17,11 +43,7 @@ impl Pool {
     pub fn new(threads: usize) -> Pool {
         #[cfg(feature = "threads")]
         {
-            let pool = if threads > 1 && cfg!(not(target_arch = "wasm32")) {
-                rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|i| format!("av1-{i}")).build().ok().map(Arc::new)
-            } else {
-                None
-            };
+            let pool = if threads > 1 && cfg!(not(target_arch = "wasm32")) { shared_pool(threads) } else { None };
             Pool { pool }
         }
         #[cfg(not(feature = "threads"))]
@@ -68,5 +90,20 @@ impl Pool {
         for (i, c) in data.chunks_mut(chunk_len).enumerate() {
             f(i, c);
         }
+    }
+}
+
+#[cfg(all(test, feature = "threads", not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matching_decoders_share_data_parallel_workers() {
+        let first = Pool::new(2);
+        let second = Pool::new(2);
+        assert!(Arc::ptr_eq(first.pool.as_ref().unwrap(), second.pool.as_ref().unwrap()));
+        let mut data = [0usize; 8];
+        second.chunks(&mut data, 2, |i, chunk| chunk.fill(i));
+        assert_eq!(data, [0, 0, 1, 1, 2, 2, 3, 3]);
     }
 }

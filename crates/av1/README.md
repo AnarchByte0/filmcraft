@@ -66,7 +66,8 @@ with libdav1d: **bit-exact** on all 6 fixtures.
 
 ## Threading and performance
 
-`Decoder::new()` uses all cores (`Decoder::with_threads(1)` decodes on the calling thread; on
+`Decoder::new()` uses up to 16 data-parallel workers, plus frame workers
+(`Decoder::with_threads(1)` decodes on the calling thread; on
 wasm32, or without the default `threads` feature, everything runs on the calling thread). Headers are parsed in order; each frame is
 then decoded by a frame worker once the reference frames it reads are finished, so independent
 frames (hierarchical GOP layers) decode concurrently; tiles of a frame decode in parallel into
@@ -75,6 +76,10 @@ restoration) each run in parallel bands of 64 rows (`postfilter.rs` explains why
 independent). Results never depend on scheduling (the oracle tests compare 1 thread, many threads
 and libdav1d). With frame threads, pictures may be returned by a
 later `decode_pts` call or by `flush`; each carries the `pts` of the temporal unit that showed it.
+
+Decoders requesting the same data-parallel worker count share a Rayon pool while it is in use.
+The bounded registry holds weak references, so dropping the last decoder releases the pool.
+Frame workers and decoding state remain private to each decoder.
 
 `tests/perf.rs` (ignored) prints single-threaded fps (thread CPU time), per-stage ms/frame
 (`Decoder::stats()`) and all-core fps with its per-stage ms/frame for 1080p fixtures (key frames,
@@ -124,6 +129,37 @@ frames whose `refresh_frame_flags` is 0 — no reference slot keeps them, so nei
 motion vectors nor CDFs reach another frame — skip deblocking, CDEF and loop restoration
 (super-resolution still runs, it sets the output size) and are flagged `Picture::draft`. In
 SVT-AV1's hierarchical GOPs that is the top layer, half of the frames.
+
+### Decoder allocation and DC-transform optimization (2026-10-12)
+
+Shown-picture slots now transfer owned `Picture` buffers instead of retaining an `Arc`
+that forces a second deep copy on output. Reference slots remain reusable by dependent
+frames. CDEF and restoration copies initialize recycled buffers directly from the source
+without a preceding zero fill; copying is fallible and reports `AllocationFailed`.
+Non-lossless `DCT_DCT` blocks with one DC coefficient reuse the exact 1D transform stages
+once for the non-zero row and once for the identical columns, preserving rounding/clamps.
+Other transform types and lossless blocks keep the full path.
+
+Measured on Windows, Ryzen 9 9900X3D, release, `AV1_THREADS=16`, against the decoder before
+these changes (AV1 sources unchanged between `d911b3b6` and base `03a7b88f`). Each fixture
+has 60 frames; each process decodes three passes, and three alternating before/after rounds
+give 540 shown frames per version. FPS below is total frames / total wall time; these are
+short synthetic SVT-AV1 preset-8 clips, not a guarantee for every source.
+
+| 1080p fixture | Before FPS | After FPS | Change |
+|---|---:|---:|---:|
+| GOP, CRF 30, 8-bit | 124.1 | 132.7 | +6.9% |
+| GOP, CRF 30, 10-bit | 118.5 | 130.3 | +10.0% |
+| GOP, CRF 18 | 46.1 | 46.7 | +1.4% |
+| GOP, CRF 30, 8 tiles | 146.9 | 151.5 | +3.1% |
+| Low-delay, CRF 30 | 56.0 | 57.5 | +2.7% |
+
+Regression checks cover output-buffer ownership, delayed errors, reusable reference slots,
+recycled/padded plane contents, shared-pool ownership, and DC-transform equivalence for all
+19 transform sizes at 8/10/12-bit, including signed dequant limits. The AV1 all-target oracle
+tests remain bit-exact against external libdav1d, including intra/inter, tile threading,
+draft mode, 4:2:2/4:4:4, super-resolution and film grain. Sequential/no-default-feature tests,
+WASM checks with and without threads, and AV1/codecs Clippy pass.
 
 ## API
 
