@@ -78,6 +78,10 @@ impl SymbolEncoder {
 
     #[inline(always)]
     fn encode_symbol(&mut self, symbol: usize, cdf: &[u16], n: usize) {
+        if n == 0 {
+            return;
+        }
+        let symbol = symbol.min(n - 1);
         let cur_range = self.range;
         let fl = if symbol == 0 { 1u32 << 15 } else { (1u32 << 15) - cdf[symbol - 1] as u32 };
         let fh = (1u32 << 15) - cdf[symbol] as u32;

@@ -97,7 +97,6 @@ fn test_av1enc_mp4_mux_and_decode_gradient_psnr() {
     assert_eq!(pics[0].height, h);
 
     let psnr = filmcraft_av1enc::compute_psnr_u16(&y_plane, &pics[0].planes[0]).unwrap();
-    // In baseline all-intra mode with skip=1 (no transform residuals), directional prediction
-    // approximates macro trends without high-frequency residual coefficients (typical PSNR ~10..15 dB).
+    // In intra mode with transform residuals and directional prediction, reconstructed PSNR improves.
     assert!(psnr > 10.0, "Reconstruction PSNR should be > 10 dB, got {psnr:.2} dB");
 }

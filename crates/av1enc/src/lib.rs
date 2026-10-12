@@ -82,6 +82,9 @@ pub struct Encoder {
     frame_count: u64,
     active_qindex: u8,
     bit_reservoir: i64,
+    recon_y: Vec<u8>,
+    recon_u: Vec<u8>,
+    recon_v: Vec<u8>,
 }
 
 impl Encoder {
@@ -105,7 +108,17 @@ impl Encoder {
             Some(RateControl::Cbr { .. } | RateControl::Vbr { .. }) => config.qindex,
             None => config.qindex,
         };
-        Ok(Self { config, frame_count: 0, active_qindex: initial_qindex, bit_reservoir: 0 })
+        let y_len = (config.width as usize).saturating_mul(config.height as usize);
+        let uv_len = ((config.width as usize) / 2).saturating_mul((config.height as usize) / 2);
+        Ok(Self {
+            config,
+            frame_count: 0,
+            active_qindex: initial_qindex,
+            bit_reservoir: 0,
+            recon_y: vec![128; y_len],
+            recon_u: vec![128; uv_len],
+            recon_v: vec![128; uv_len],
+        })
     }
 
     pub fn config(&self) -> &EncoderConfig {
@@ -210,15 +223,33 @@ impl Encoder {
             Vec::new()
         };
 
+        let width = self.config.width as usize;
+        let height = self.config.height as usize;
+        let uv_width = width / 2;
+
+        if is_key || self.frame_count == 0 {
+            self.recon_y.fill(128);
+            self.recon_u.fill(128);
+            self.recon_v.fill(128);
+        }
+
         let mut above_modes = vec![intra::DC_PRED; sb_cols as usize];
+        let mut above_skips = vec![false; sb_cols as usize];
 
         for r in 0..sb_rows {
             let mut left_mode = intra::DC_PRED;
+            let mut left_skip = false;
 
             for c in 0..sb_cols {
                 let avail_u = r > 0;
                 let avail_l = c > 0;
-                let skip_ctx = (avail_u as usize) + (avail_l as usize);
+                let mut skip_ctx = 0;
+                if avail_u {
+                    skip_ctx += above_skips[c as usize] as usize;
+                }
+                if avail_l {
+                    skip_ctx += left_skip as usize;
+                }
 
                 let actx = tables::INTRA_MODE_CONTEXT.get(above_modes[c as usize] as usize).copied().unwrap_or(0) as usize;
                 let lctx = tables::INTRA_MODE_CONTEXT.get(left_mode as usize).copied().unwrap_or(0) as usize;
@@ -229,23 +260,119 @@ impl Encoder {
                     intra::DC_PRED
                 };
 
-                sym.write_symbol_no_update(0, &tables::DEFAULT_PARTITION_W64_CDF);
-                sym.write_symbol_no_update(1, &tables::DEFAULT_SKIP_CDF[skip_ctx]);
-                sym.write_symbol_no_update(y_mode as usize, &tables::DEFAULT_INTRA_FRAME_Y_MODE_CDF[actx][lctx]);
+                let x0 = (c as usize) * 64;
+                let y0 = (r as usize) * 64;
+                let block_w = 64.min(width.saturating_sub(x0));
+                let block_h = 64.min(height.saturating_sub(y0));
 
-                if y_mode == intra::V_PRED || y_mode == intra::H_PRED {
-                    sym.write_symbol_no_update(3, &tables::DEFAULT_ANGLE_DELTA_CDF[y_mode as usize - 1]);
-                }
+                let (dc_level, is_neg) = compute_and_reconstruct_plane_dc(
+                    frame.y,
+                    frame.y_stride,
+                    &mut self.recon_y,
+                    width,
+                    x0,
+                    y0,
+                    block_w,
+                    block_h,
+                    y_mode,
+                    avail_u,
+                    avail_l,
+                    qindex,
+                    512,
+                );
 
                 let uv_mode = if y_mode == intra::V_PRED || y_mode == intra::H_PRED { y_mode } else { intra::DC_PRED };
-                sym.write_symbol_no_update(uv_mode as usize, &tables::DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF[y_mode as usize]);
 
-                if uv_mode == intra::V_PRED || uv_mode == intra::H_PRED {
-                    sym.write_symbol_no_update(3, &tables::DEFAULT_ANGLE_DELTA_CDF[uv_mode as usize - 1]);
+                let (u_dc_level, u_is_neg) = compute_and_reconstruct_plane_dc(
+                    frame.u,
+                    frame.uv_stride,
+                    &mut self.recon_u,
+                    uv_width,
+                    x0 / 2,
+                    y0 / 2,
+                    (block_w / 2).max(1),
+                    (block_h / 2).max(1),
+                    uv_mode,
+                    avail_u,
+                    avail_l,
+                    qindex,
+                    256,
+                );
+
+                let (v_dc_level, v_is_neg) = compute_and_reconstruct_plane_dc(
+                    frame.v,
+                    frame.uv_stride,
+                    &mut self.recon_v,
+                    uv_width,
+                    x0 / 2,
+                    y0 / 2,
+                    (block_w / 2).max(1),
+                    (block_h / 2).max(1),
+                    uv_mode,
+                    avail_u,
+                    avail_l,
+                    qindex,
+                    256,
+                );
+
+                let has_residual = dc_level > 0 || u_dc_level > 0 || v_dc_level > 0;
+
+                sym.write_symbol_no_update(0, &tables::DEFAULT_PARTITION_W64_CDF);
+
+                if has_residual {
+                    sym.write_symbol_no_update(0, &tables::DEFAULT_SKIP_CDF[skip_ctx]);
+                    sym.write_symbol_no_update(y_mode as usize, &tables::DEFAULT_INTRA_FRAME_Y_MODE_CDF[actx][lctx]);
+
+                    if y_mode == intra::V_PRED || y_mode == intra::H_PRED {
+                        sym.write_symbol_no_update(3, &tables::DEFAULT_ANGLE_DELTA_CDF[y_mode as usize - 1]);
+                    }
+
+                    sym.write_symbol_no_update(uv_mode as usize, &tables::DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF[y_mode as usize]);
+
+                    if uv_mode == intra::V_PRED || uv_mode == intra::H_PRED {
+                        sym.write_symbol_no_update(3, &tables::DEFAULT_ANGLE_DELTA_CDF[uv_mode as usize - 1]);
+                    }
+
+                    // Write residuals for non-skip block:
+                    // Plane 0 (Y): 64x64 transform DC residual
+                    if dc_level > 0 {
+                        coeff::encode_dc_residual(&mut sym, qindex, 4, 0, dc_level, is_neg);
+                    } else {
+                        coeff::write_txb_skip(&mut sym, qindex, 4, 0, true);
+                    }
+
+                    // Plane 1 (U): 32x32 transform DC residual
+                    if u_dc_level > 0 {
+                        coeff::encode_dc_residual(&mut sym, qindex, 3, 7, u_dc_level, u_is_neg);
+                    } else {
+                        coeff::write_txb_skip(&mut sym, qindex, 3, 7, true);
+                    }
+
+                    // Plane 2 (V): 32x32 transform DC residual
+                    if v_dc_level > 0 {
+                        coeff::encode_dc_residual(&mut sym, qindex, 3, 7, v_dc_level, v_is_neg);
+                    } else {
+                        coeff::write_txb_skip(&mut sym, qindex, 3, 7, true);
+                    }
+                } else {
+                    sym.write_symbol_no_update(1, &tables::DEFAULT_SKIP_CDF[skip_ctx]);
+                    sym.write_symbol_no_update(y_mode as usize, &tables::DEFAULT_INTRA_FRAME_Y_MODE_CDF[actx][lctx]);
+
+                    if y_mode == intra::V_PRED || y_mode == intra::H_PRED {
+                        sym.write_symbol_no_update(3, &tables::DEFAULT_ANGLE_DELTA_CDF[y_mode as usize - 1]);
+                    }
+
+                    sym.write_symbol_no_update(uv_mode as usize, &tables::DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF[y_mode as usize]);
+
+                    if uv_mode == intra::V_PRED || uv_mode == intra::H_PRED {
+                        sym.write_symbol_no_update(3, &tables::DEFAULT_ANGLE_DELTA_CDF[uv_mode as usize - 1]);
+                    }
                 }
 
                 above_modes[c as usize] = y_mode;
                 left_mode = y_mode;
+                above_skips[c as usize] = !has_residual;
+                left_skip = !has_residual;
             }
         }
 
@@ -293,6 +420,114 @@ impl Encoder {
     pub fn flush(&mut self) -> Result<Vec<Packet>> {
         Ok(Vec::new())
     }
+}
+
+fn compute_and_reconstruct_plane_dc(
+    src_plane: &[u8],
+    src_stride: usize,
+    recon_plane: &mut [u8],
+    recon_stride: usize,
+    x0: usize,
+    y0: usize,
+    block_w: usize,
+    block_h: usize,
+    mode: u8,
+    avail_u: bool,
+    avail_l: bool,
+    qindex: u8,
+    scale: i64,
+) -> (u32, bool) {
+    let mut src_sum = 0i64;
+    let mut count = 0i64;
+    for i in 0..block_h {
+        let row_off = (y0 + i) * src_stride + x0;
+        if let Some(row) = src_plane.get(row_off..row_off + block_w) {
+            for &p in row {
+                src_sum += p as i64;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return (0, false);
+    }
+    let src_mean = src_sum / count;
+
+    let pred_mean = match mode {
+        intra::V_PRED if avail_u && y0 > 0 => {
+            let row_offset = (y0 - 1) * recon_stride + x0;
+            recon_plane
+                .get(row_offset..row_offset + block_w)
+                .map(|row| row.iter().map(|&p| p as i64).sum::<i64>() / block_w.max(1) as i64)
+                .unwrap_or(128)
+        }
+        intra::H_PRED if avail_l && x0 > 0 => {
+            let mut left_sum = 0i64;
+            for i in 0..block_h {
+                if let Some(&p) = recon_plane.get((y0 + i) * recon_stride + x0 - 1) {
+                    left_sum += p as i64;
+                }
+            }
+            left_sum / block_h.max(1) as i64
+        }
+        _ => {
+            let mut sum = 0i64;
+            let mut n = 0i64;
+            if avail_u && y0 > 0 {
+                let row_offset = (y0 - 1) * recon_stride + x0;
+                if let Some(row) = recon_plane.get(row_offset..row_offset + block_w) {
+                    sum += row.iter().map(|&p| p as i64).sum::<i64>();
+                    n += block_w as i64;
+                }
+            }
+            if avail_l && x0 > 0 {
+                for i in 0..block_h {
+                    if let Some(&p) = recon_plane.get((y0 + i) * recon_stride + x0 - 1) {
+                        sum += p as i64;
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                (sum + (n / 2)) / n
+            } else {
+                128
+            }
+        }
+    };
+
+    let diff = src_mean - pred_mean;
+    let dc_q = tables::DC_QLOOKUP_8BIT[qindex as usize] as i64;
+    let dc_level = ((diff.abs().saturating_mul(scale) + (dc_q / 2)) / dc_q.max(1)) as u32;
+    let is_negative = diff < 0;
+
+    let recon_shift = if dc_level == 0 {
+        0
+    } else {
+        let mag = (dc_level as i64 * dc_q) / scale;
+        if is_negative { -mag } else { mag }
+    };
+
+    for i in 0..block_h {
+        for j in 0..block_w {
+            let pred_pixel = match mode {
+                intra::V_PRED if avail_u && y0 > 0 => {
+                    recon_plane.get((y0 - 1) * recon_stride + x0 + j).copied().unwrap_or(128) as i64
+                }
+                intra::H_PRED if avail_l && x0 > 0 => {
+                    recon_plane.get((y0 + i) * recon_stride + x0.saturating_sub(1)).copied().unwrap_or(128) as i64
+                }
+                _ => pred_mean,
+            };
+            let recon_pixel = (pred_pixel + recon_shift).clamp(0, 255) as u8;
+            let dst_idx = (y0 + i) * recon_stride + x0 + j;
+            if dst_idx < recon_plane.len() {
+                recon_plane[dst_idx] = recon_pixel;
+            }
+        }
+    }
+
+    (dc_level, is_negative)
 }
 
 /// Compute Mean Squared Error (MSE) between two byte planes of identical length.

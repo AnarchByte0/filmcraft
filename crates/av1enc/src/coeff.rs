@@ -48,6 +48,18 @@ pub fn find_eob_4x4(quant: &[i16; 16]) -> usize {
 }
 
 use crate::symbol::SymbolEncoder;
+use crate::tables;
+
+/// Convert qindex (0..=255) to AV1 spec CDF table tier (0..=3).
+#[inline(always)]
+pub fn qindex_to_tier(qindex: u8) -> usize {
+    match qindex {
+        0..=20 => 0,
+        21..=60 => 1,
+        61..=120 => 2,
+        _ => 3,
+    }
+}
 
 /// Default CDF for transform block skip (`txb_skip`, Section 9.3).
 pub static DEFAULT_TXB_SKIP_CDF: [u16; 3] = [31849, 32768, 0];
@@ -58,10 +70,13 @@ pub static DEFAULT_EOB_PT_16_CDF: [u16; 6] = [840, 1039, 1980, 4895, 32768, 0];
 /// Default CDF for eob extra bits.
 pub static DEFAULT_EOB_EXTRA_CDF: [u16; 3] = [16384, 32768, 0];
 
-/// Write a transform block skip flag (`txb_skip`).
-/// `all_zero = true` writes symbol 1, indicating all coefficients are zero.
-pub fn write_txb_skip(sym: &mut SymbolEncoder, all_zero: bool) {
-    sym.write_symbol_no_update(if all_zero { 1 } else { 0 }, &DEFAULT_TXB_SKIP_CDF);
+/// Write a transform block skip flag (`txb_skip`) using qindex tier, transform size context, and skip context.
+pub fn write_txb_skip(sym: &mut SymbolEncoder, qindex: u8, tx_sz_ctx: usize, ctx: usize, all_zero: bool) {
+    let tier = qindex_to_tier(qindex);
+    let s_ctx = tx_sz_ctx.min(4);
+    let c_ctx = ctx.min(12);
+    let cdf = &tables::DEFAULT_TXB_SKIP_CDF[tier][s_ctx][c_ctx];
+    sym.write_symbol_no_update(if all_zero { 1 } else { 0 }, cdf);
 }
 
 /// Write EOB syntax for a 4x4 transform block into the symbol stream.
@@ -75,6 +90,69 @@ pub fn write_eob_4x4(sym: &mut SymbolEncoder, eob: usize) {
     for i in (0..lit_bits).rev() {
         let bit = ((lit_val >> i) & 1) == 1;
         sym.write_bool(bit);
+    }
+}
+
+/// Encode a single DC residual for a transform block (e.g. 64x64, 32x32, or 4x4).
+pub fn encode_dc_residual(
+    sym: &mut SymbolEncoder,
+    qindex: u8,
+    tx_sz_ctx: usize,
+    ctx: usize,
+    level: u32,
+    is_negative: bool,
+) {
+    if level == 0 {
+        write_txb_skip(sym, qindex, tx_sz_ctx, ctx, true);
+        return;
+    }
+
+    let tier = qindex_to_tier(qindex);
+    let s_ctx = tx_sz_ctx.min(4);
+
+    // 1. txb_skip = 0 (block is not skipped)
+    write_txb_skip(sym, qindex, tx_sz_ctx, ctx, false);
+
+    // 2. eob = 1: eob_pt symbol 0 (no extra bits)
+    match s_ctx {
+        4 => sym.write_symbol_no_update(0, &tables::DEFAULT_EOB_PT_1024_CDF_BY_TIER[tier]),
+        3 => sym.write_symbol_no_update(0, &tables::DEFAULT_EOB_PT_512_CDF_BY_TIER[tier]),
+        _ => sym.write_symbol_no_update(0, &tables::DEFAULT_EOB_PT_16_CDF_BY_TIER[tier]),
+    }
+
+    // 3. coeff_base_eob: symbol = (level - 1).min(2) (NUM_BASE_LEVELS = 2)
+    let base_sym = ((level - 1).min(2)) as usize;
+    sym.write_symbol_no_update(base_sym, &tables::DEFAULT_COEFF_BASE_EOB_CDF_BY_TIER[tier][s_ctx]);
+
+    // 4. If level > 2 (i.e. > NUM_BASE_LEVELS), write extra br-levels
+    if level > 2 {
+        let mut rem = level - 3;
+        let br_cdf = &tables::DEFAULT_COEFF_BR_DC_CDF_BY_TIER[tier][s_ctx.min(3)];
+        for _ in 0..(tables::COEFF_BASE_RANGE / (tables::BR_CDF_SIZE - 1)) {
+            let br = rem.min(3);
+            sym.write_symbol_no_update(br as usize, br_cdf);
+            rem = rem.saturating_sub(br);
+            if br < 3 {
+                break;
+            }
+        }
+    }
+
+    // 5. dc_sign: symbol 1 if negative, 0 if positive
+    sym.write_symbol_no_update(if is_negative { 1 } else { 0 }, &tables::DEFAULT_DC_SIGN_CDF);
+
+    // 6. Exp-Golomb escape if level > NUM_BASE_LEVELS + COEFF_BASE_RANGE (14)
+    if level > tables::COEFF_BASE_RANGE + 2 {
+        let x = level - (tables::COEFF_BASE_RANGE + 2);
+        let length = 32 - x.leading_zeros();
+        for _ in 0..(length - 1) {
+            sym.write_literal(0, 1);
+        }
+        sym.write_literal(1, 1);
+        for i in (0..length - 1).rev() {
+            let bit = (x >> i) & 1;
+            sym.write_literal(bit, 1);
+        }
     }
 }
 
@@ -122,8 +200,17 @@ mod tests {
     #[test]
     fn test_write_txb_skip_and_eob() {
         let mut sym = SymbolEncoder::new();
-        write_txb_skip(&mut sym, false);
+        write_txb_skip(&mut sym, 20, 0, 0, false);
         write_eob_4x4(&mut sym, 4);
+        let bytes = sym.finish();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_encode_dc_residual() {
+        let mut sym = SymbolEncoder::new();
+        encode_dc_residual(&mut sym, 100, 4, 0, 3, false);
+        encode_dc_residual(&mut sym, 100, 4, 0, 10, true);
         let bytes = sym.finish();
         assert!(!bytes.is_empty());
     }
