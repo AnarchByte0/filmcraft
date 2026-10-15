@@ -53,7 +53,7 @@ fn test_raw_non_skip_residual_tile() {
     sym.write_symbol_no_update(0, &tables::DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF[0]);
 
     // 5. Residuals for Y (plane 0, tx_sz = TX_64X64, ctx = 0):
-    coeff::encode_dc_residual(&mut sym, 100, 0, 4, 0, 0, 3, false);
+    coeff::encode_dc_residual(&mut sym, 100, 0, 4, 0, 0, 3, false, 0);
 
     // 6. Residuals for U (plane 1, tx_sz = TX_32X32, ctx = 7):
     coeff::write_txb_skip(&mut sym, 100, 3, 7, true);
@@ -83,7 +83,7 @@ fn test_raw_non_skip_residual_tile() {
     sym_neg.write_symbol_no_update(0, &tables::DEFAULT_SKIP_CDF[0]);
     sym_neg.write_symbol_no_update(0, &tables::DEFAULT_INTRA_FRAME_Y_MODE_CDF[0][0]);
     sym_neg.write_symbol_no_update(0, &tables::DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF[0]);
-    coeff::encode_dc_residual(&mut sym_neg, 100, 0, 4, 0, 0, 10, true); // negative level 10!
+    coeff::encode_dc_residual(&mut sym_neg, 100, 0, 4, 0, 0, 10, true, 0); // negative level 10!
     coeff::write_txb_skip(&mut sym_neg, 100, 3, 7, true);
     coeff::write_txb_skip(&mut sym_neg, 100, 3, 7, true);
 

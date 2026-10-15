@@ -90,8 +90,21 @@ pub fn write_eob_4x4(sym: &mut SymbolEncoder, eob: usize) {
     }
 }
 
-/// Encode a single DC residual for a transform block (e.g. 64x64, 32x32, 16x16, or 4x4).
-pub fn encode_dc_residual(sym: &mut SymbolEncoder, qindex: u8, plane: usize, tx_sz_ctx: usize, ctx: usize, dc_sign_ctx: usize, level: u32, is_negative: bool) {
+/// Encode a single DC residual for a transform block (e.g. 64x64, 32x32, 16x16, 8x8, or 4x4).
+/// When `plane == 0`, `tx_sz_ctx <= 2`, and `qindex > 0`, `y_mode` is used to signal `DCT_DCT`
+/// from `DEFAULT_INTRA_TX_TYPE_SET2_CDF[tx_sz_ctx][y_mode]`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_dc_residual(
+    sym: &mut SymbolEncoder,
+    qindex: u8,
+    plane: usize,
+    tx_sz_ctx: usize,
+    ctx: usize,
+    dc_sign_ctx: usize,
+    level: u32,
+    is_negative: bool,
+    y_mode: u8,
+) {
     if level == 0 {
         write_txb_skip(sym, qindex, tx_sz_ctx, ctx, true);
         return;
@@ -103,17 +116,31 @@ pub fn encode_dc_residual(sym: &mut SymbolEncoder, qindex: u8, plane: usize, tx_
     // 1. txb_skip = 0 (block is not skipped)
     write_txb_skip(sym, qindex, tx_sz_ctx, ctx, false);
 
+    // 1b. transform_type (spec 5.11.39): for intra luma blocks with tx_sz <= 16x16 (s_ctx <= 2)
+    // and reduced_tx_set == 1, get_tx_set returns TX_SET_INTRA_2 (2).
+    // In TX_TYPE_INTRA_INV_SET2 = [9, 0, 3, 1, 2], DCT_DCT (0) is symbol 1.
+    if plane == 0
+        && s_ctx <= 2
+        && qindex > 0
+        && let Some(tx_cdf) = tables::DEFAULT_INTRA_TX_TYPE_SET2_CDF.get(s_ctx).and_then(|s| s.get(y_mode as usize))
+    {
+        sym.write_symbol_no_update(1, tx_cdf);
+    }
+
     // 2. eob = 1: eob_pt symbol 0 (no extra bits)
     let eob_cdf: Option<&[u16]> = if plane == 0 {
         match s_ctx {
             4 | 3 => tables::DEFAULT_EOB_PT_1024_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
+            2 => tables::DEFAULT_EOB_PT_256_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
+            1 => tables::DEFAULT_EOB_PT_64_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
             _ => tables::DEFAULT_EOB_PT_16_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
         }
     } else {
         match s_ctx {
-            3 => tables::DEFAULT_EOB_PT_1024_CHROMA_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
+            4 | 3 => tables::DEFAULT_EOB_PT_1024_CHROMA_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
             2 => tables::DEFAULT_EOB_PT_256_CHROMA_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
-            _ => tables::DEFAULT_EOB_PT_16_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
+            1 => tables::DEFAULT_EOB_PT_64_CHROMA_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
+            _ => tables::DEFAULT_EOB_PT_16_CHROMA_CDF_BY_TIER.get(tier).map(|a| a.as_slice()),
         }
     };
     if let Some(cdf) = eob_cdf {
@@ -134,7 +161,12 @@ pub fn encode_dc_residual(sym: &mut SymbolEncoder, qindex: u8, plane: usize, tx_
     // 4. If level > 2 (i.e. > NUM_BASE_LEVELS), write extra br-levels
     if level > 2 {
         let mut rem = level - 3;
-        if let Some(br_cdf) = tables::DEFAULT_COEFF_BR_DC_CDF_BY_TIER.get(tier).and_then(|t| t.get(s_ctx.min(3))) {
+        let br_cdf = if plane == 0 {
+            tables::DEFAULT_COEFF_BR_DC_CDF_BY_TIER.get(tier).and_then(|t| t.get(s_ctx.min(3)))
+        } else {
+            tables::DEFAULT_COEFF_BR_DC_CHROMA_CDF_BY_TIER.get(tier).and_then(|t| t.get(s_ctx.min(3)))
+        };
+        if let Some(br_cdf) = br_cdf {
             for _ in 0..(tables::COEFF_BASE_RANGE / (tables::BR_CDF_SIZE - 1)) {
                 let br = rem.min(3);
                 sym.write_symbol_no_update(br as usize, br_cdf);
@@ -219,9 +251,9 @@ mod tests {
     #[test]
     fn test_encode_dc_residual() {
         let mut sym = SymbolEncoder::new();
-        encode_dc_residual(&mut sym, 100, 0, 4, 0, 0, 3, false);
-        encode_dc_residual(&mut sym, 100, 0, 4, 0, 1, 10, true);
-        encode_dc_residual(&mut sym, 100, 1, 3, 7, 0, 2, false); // Chroma test
+        encode_dc_residual(&mut sym, 100, 0, 4, 0, 0, 3, false, 0);
+        encode_dc_residual(&mut sym, 100, 0, 4, 0, 1, 10, true, 0);
+        encode_dc_residual(&mut sym, 100, 1, 3, 7, 0, 2, false, 0); // Chroma test
         let bytes = sym.finish();
         assert!(!bytes.is_empty());
     }

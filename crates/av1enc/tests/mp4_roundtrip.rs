@@ -196,3 +196,93 @@ fn test_av1enc_scene_cut_detection() {
     assert_eq!(pics[3].planes[0][0], 220);
     assert_eq!(pics[4].planes[0][0], 220);
 }
+
+#[test]
+fn test_av1enc_non_64_colored_matte_160x96() {
+    use filmcraft_av1enc::Preset;
+
+    // 160x96 blue matte (Y=82, U=170, V=90) — reproduces the exact geometry and chroma
+    // residuals from Chaython/filmcraft#1 where 160 = 2*64 + 32 and 96 = 1*64 + 32.
+    for preset in [Preset::Speed, Preset::Balanced, Preset::Quality] {
+        let (w, h) = (160u32, 96u32);
+        let mut cfg = EncoderConfig::new(w, h, 24, 10);
+        cfg.preset = preset;
+        let mut enc = Encoder::new(cfg).unwrap();
+
+        let y_plane = vec![82u8; (w * h) as usize];
+        let u_plane = vec![170u8; ((w / 2) * (h / 2)) as usize];
+        let v_plane = vec![90u8; ((w / 2) * (h / 2)) as usize];
+        let frame = YuvFrame { y: &y_plane, u: &u_plane, v: &v_plane, y_stride: w as usize, uv_stride: (w / 2) as usize };
+
+        let mut dec = filmcraft_av1::Decoder::new();
+        let mut decoded = Vec::new();
+        for i in 0..4 {
+            let pkt = enc.encode(&frame, i * 1000).unwrap();
+            decoded.extend(dec.decode(&pkt.data).unwrap());
+        }
+        decoded.extend(dec.flush());
+
+        assert_eq!(decoded.len(), 4);
+        for pic in &decoded {
+            assert_eq!(pic.width, w);
+            assert_eq!(pic.height, h);
+            let psnr_y = filmcraft_av1enc::compute_psnr_u16(&y_plane, &pic.planes[0]).unwrap();
+            let psnr_u = filmcraft_av1enc::compute_psnr_u16(&u_plane, &pic.planes[1]).unwrap();
+            let psnr_v = filmcraft_av1enc::compute_psnr_u16(&v_plane, &pic.planes[2]).unwrap();
+            println!(
+                "preset {preset:?}: psnr_y={psnr_y:.2} psnr_u={psnr_u:.2} psnr_v={psnr_v:.2} | Y[0]={} Y[70]={} Y[140]={} Y[64*160]={}",
+                pic.planes[0][0],
+                pic.planes[0][70],
+                pic.planes[0][140],
+                pic.planes[0][64 * 160]
+            );
+            assert!(psnr_y > 35.0, "preset {preset:?} Y PSNR too low: {psnr_y}");
+            assert!(psnr_u > 30.0, "preset {preset:?} U PSNR too low: {psnr_u}");
+            assert!(psnr_v > 30.0, "preset {preset:?} V PSNR too low: {psnr_v}");
+        }
+    }
+}
+
+#[test]
+fn test_av1enc_arbitrary_resolutions_colored_gradients() {
+    use filmcraft_av1enc::Preset;
+
+    // Resolutions exercising 64x64, 32x32, 16x16, and 8x8 boundary splits
+    // with non-flat Y, U, and V planes across multiple superblock rows.
+    for (w, h) in [(100u32, 60u32), (160, 96), (320, 240), (200, 136)] {
+        let mut cfg = EncoderConfig::new(w, h, 30, 5);
+        cfg.preset = Preset::Quality;
+        let mut enc = Encoder::new(cfg).unwrap();
+
+        let mut y_plane = vec![0u8; (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                y_plane[(y * w + x) as usize] = (40 + ((x * 160) / w) + ((y * 40) / h)).min(235) as u8;
+            }
+        }
+        let uv_w = w / 2;
+        let uv_h = h / 2;
+        let mut u_plane = vec![0u8; (uv_w * uv_h) as usize];
+        let mut v_plane = vec![0u8; (uv_w * uv_h) as usize];
+        for y in 0..uv_h {
+            for x in 0..uv_w {
+                u_plane[(y * uv_w + x) as usize] = (60 + ((x * 140) / uv_w)).min(240) as u8;
+                v_plane[(y * uv_w + x) as usize] = (200usize.saturating_sub(((y * 120) / uv_h) as usize)).max(16) as u8;
+            }
+        }
+
+        let frame = YuvFrame { y: &y_plane, u: &u_plane, v: &v_plane, y_stride: w as usize, uv_stride: uv_w as usize };
+        let mut dec = filmcraft_av1::Decoder::new();
+        let mut pics = Vec::new();
+        for i in 0..3 {
+            let pkt = enc.encode(&frame, i * 1000).unwrap();
+            pics.extend(dec.decode(&pkt.data).unwrap());
+        }
+        pics.extend(dec.flush());
+        assert_eq!(pics.len(), 3, "Failed for {w}x{h}");
+        for pic in &pics {
+            assert_eq!(pic.width, w);
+            assert_eq!(pic.height, h);
+        }
+    }
+}
