@@ -286,11 +286,15 @@ impl VideoEncoder for QsvEncoder {
 /// The export encoder factory registered with `filmcraft_export::register_encoder`.
 pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
     let codec = match format {
-        Format::H264 if s.hardware_encoding == HardwareEncoding::Auto => Codec::H264,
+        Format::H264 if s.hardware_encoding == HardwareEncoding::Auto && !s.signal.is_hdr() => Codec::H264,
         Format::Hevc => Codec::Hevc,
         Format::Av1 => Codec::Av1,
         _ => return None,
     };
+
+    if w == 0 || h == 0 || !w.is_multiple_of(2) || !h.is_multiple_of(2) || w > 8192 || h > 8192 {
+        return None;
+    }
 
     // Check if an Intel GPU is physically present
     IntelGpu::probe().ok().flatten()?;

@@ -4,7 +4,9 @@
 
 #![allow(unsafe_code)]
 
+#[cfg(target_os = "windows")]
 use std::collections::VecDeque;
+#[cfg(target_os = "windows")]
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -290,7 +292,7 @@ pub struct QsvSession {
 impl QsvSession {
     /// Create a new hardware encoding session on the Intel GPU.
     pub fn new(config: Config) -> Result<Self, String> {
-        let gpu = IntelGpu::shared()?;
+        let _ = IntelGpu::shared()?;
         Err(format!("Intel Quick Sync ({}) via Media Foundation is Windows-only; Linux uses VA-API", config.codec.name()))
     }
 
@@ -330,6 +332,7 @@ fn make_video_type(api: &MfApi, subtype: GUID, w: u32, h: u32, rate: FrameRate) 
     Ok(t)
 }
 
+#[cfg(target_os = "windows")]
 fn make_sample(api: &MfApi, data: &[u8], time: i64) -> Result<IMFSample, String> {
     let len = u32::try_from(data.len()).map_err(|_| "input data too large".to_string())?;
     let mut raw_buf = std::ptr::null_mut();
@@ -362,6 +365,7 @@ fn make_sample(api: &MfApi, data: &[u8], time: i64) -> Result<IMFSample, String>
     Ok(sample)
 }
 
+#[cfg(target_os = "windows")]
 fn make_empty_buffer(api: &MfApi, len: u32) -> Result<IMFMediaBuffer, String> {
     let mut raw_buf = std::ptr::null_mut();
     // SAFETY: CreateMemoryBuffer call.
@@ -369,6 +373,7 @@ fn make_empty_buffer(api: &MfApi, len: u32) -> Result<IMFMediaBuffer, String> {
     super::super::media_foundation::mft::made(hr, raw_buf, "MFCreateMemoryBuffer")
 }
 
+#[cfg(target_os = "windows")]
 fn make_sample_with_buffer(api: &MfApi, buffer: &IMFMediaBuffer) -> Result<IMFSample, String> {
     let mut raw_sample = std::ptr::null_mut();
     // SAFETY: CreateSample call.
@@ -381,6 +386,7 @@ fn make_sample_with_buffer(api: &MfApi, buffer: &IMFMediaBuffer) -> Result<IMFSa
     Ok(sample)
 }
 
+#[cfg(target_os = "windows")]
 unsafe fn read_sample_bytes(sample: &IMFSample) -> Result<Vec<u8>, String> {
     // SAFETY: COM calls on sample and buffer.
     let buffer = unsafe { sample.ConvertToContiguousBuffer() }.map_err(|e| format!("ConvertToContiguousBuffer failed: {e}"))?;
