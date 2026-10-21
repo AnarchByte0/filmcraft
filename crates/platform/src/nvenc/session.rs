@@ -377,15 +377,17 @@ impl Session {
                 rc.vbvBufferSize = rc.maxBitRate;
                 rc.vbvInitialDelay = rc.vbvBufferSize;
             }
-            if p.spatial_aq {
-                rc.flags |= RC_ENABLE_AQ;
-            }
-            if let Some(la) = p.lookahead {
-                rc.flags |= RC_ENABLE_LOOKAHEAD;
-                rc.lookaheadDepth = la.clamp(1, 64) as u16;
-            }
-            if p.multipass {
-                rc.multiPass = 2;
+            if !p.cqp {
+                if p.spatial_aq {
+                    rc.flags |= RC_ENABLE_AQ;
+                }
+                if let Some(la) = p.lookahead {
+                    rc.flags |= RC_ENABLE_LOOKAHEAD;
+                    rc.lookaheadDepth = la.clamp(1, 64) as u16;
+                }
+                if p.multipass {
+                    rc.multiPass = 2;
+                }
             }
             match p.codec {
                 Codec::H264 => {

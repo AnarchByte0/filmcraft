@@ -3589,3 +3589,6 @@
 	Multipass	Multipasses
 	Quantizer (QP)	Quantificateur (QP)
 	Spatial AQ	AQ spatiale
+	Enable hardware two-pass / multipass rate control	Activer le contrôle de débit deux passes / multipasses matériel
+	Enable spatial adaptive quantization	Activer la quantification adaptative spatiale
+	Enable lookahead frame analysis	Activer l'analyse des images par anticipation

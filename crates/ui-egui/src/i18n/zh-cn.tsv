@@ -3597,3 +3597,6 @@
 	Multipass	多遍处理
 	Quantizer (QP)	量化参数 (QP)
 	Spatial AQ	空间自适应量化 (AQ)
+	Enable hardware two-pass / multipass rate control	启用硬件双遍/多遍码率控制
+	Enable spatial adaptive quantization	启用空间自适应量化
+	Enable lookahead frame analysis	启用前向预测帧分析

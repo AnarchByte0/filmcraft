@@ -691,25 +691,22 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
     }
     match s.video_format() {
         f @ (Format::H264 | Format::Hevc | Format::Av1) => {
-            let hevc = f == Format::Hevc;
-            let av1 = f == Format::Av1;
+            // H.265 and AV1: hardware encoders only (one profile, level chosen by the encoder)
+            let hevc = f != Format::H264;
             if hevc {
-                // the hardware encoder writes Main (8-bit 4:2:0), or Main 10 for HDR sequences where it can; level chosen by the encoder
-                let label = match (filmcraft_engine::export::hdr_available(Format::Hevc), seq_hdr && !s.sdr) {
-                    (true, true) => tl!("Main 10 (10-bit, HDR)"),
-                    (true, false) => tl!("Main (8-bit; Main 10 for HDR sequences)"),
-                    (false, _) => tl!("Main (8-bit)"),
-                };
-                row(ui, t, tl!("Profile"), |ui| ui.label(label));
-                row(ui, t, tl!("Encoder"), |ui| ui.label(tl!("Hardware (H.265 has no software encoder)")));
-            } else if av1 {
-                let label = match (filmcraft_engine::export::hdr_available(Format::Av1), seq_hdr && !s.sdr) {
-                    (true, true) => tl!("Main 10 (10-bit, HDR)"),
-                    (true, false) => tl!("Main (8-bit; Main 10 for HDR sequences)"),
-                    (false, _) => tl!("Main (8-bit)"),
-                };
-                row(ui, t, tl!("Profile"), |ui| ui.label(label));
-                row(ui, t, tl!("Encoder"), |ui| ui.label(tl!("Hardware or built-in")));
+                if f == Format::Av1 {
+                    row(ui, t, tl!("Profile"), |ui| ui.label(tl!("Main (8-bit)")));
+                    row(ui, t, tl!("Encoder"), |ui| ui.label(tl!("Hardware (AV1 has no software encoder)")));
+                } else {
+                    // the hardware encoder writes Main (8-bit 4:2:0), or Main 10 for HDR sequences where it can; level chosen by the encoder
+                    let label = match (filmcraft_engine::export::hdr_available(Format::Hevc), seq_hdr && !s.sdr) {
+                        (true, true) => tl!("Main 10 (10-bit, HDR)"),
+                        (true, false) => tl!("Main (8-bit; Main 10 for HDR sequences)"),
+                        (false, _) => tl!("Main (8-bit)"),
+                    };
+                    row(ui, t, tl!("Profile"), |ui| ui.label(label));
+                    row(ui, t, tl!("Encoder"), |ui| ui.label(tl!("Hardware (H.265 has no software encoder)")));
+                }
             } else {
                 row(ui, t, tl!("Profile"), |ui| {
                     let o = [H264Profile::Baseline, H264Profile::Main, H264Profile::High];
@@ -730,13 +727,15 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             }
             row(ui, t, tl!("Bitrate Encoding"), |ui| {
                 // a hardware encoder has one pass and no constant-quality mode: H.265 / AV1 offer neither
+                let cqp_supported = (hevc || s.hardware_encoding == HardwareEncoding::Auto) && filmcraft_engine::export::cqp_available(s.format);
                 let o = [BitrateMode::Cbr, BitrateMode::Vbr1Pass, BitrateMode::Vbr2Pass, BitrateMode::Crf, BitrateMode::Cqp];
                 let labels: Vec<(String, bool)> = o
                     .iter()
                     .map(|m| {
                         let allowed = match m {
-                            BitrateMode::Vbr2Pass => !(hevc || av1),
-                            BitrateMode::Crf => !(hevc || av1),
+                            BitrateMode::Vbr2Pass => !hevc,
+                            BitrateMode::Crf => !hevc,
+                            BitrateMode::Cqp => cqp_supported,
                             _ => true,
                         };
                         (m.label().to_string(), allowed)
@@ -796,17 +795,17 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                     *k = v as u32;
                 }
             });
-            let is_hw = hevc || av1 || s.hardware_encoding == HardwareEncoding::Auto;
-            if is_hw {
+            let cqp_supported = (hevc || s.hardware_encoding == HardwareEncoding::Auto) && filmcraft_engine::export::cqp_available(s.format);
+            if cqp_supported {
                 row(ui, t, tl!("Multipass"), |ui| {
-                    check(ui, reg, "export.video.multipass", &mut s.multipass, "Enable hardware two-pass / multipass rate control");
+                    check(ui, reg, "export.video.multipass", &mut s.multipass, tl!("Enable hardware two-pass / multipass rate control"));
                 });
                 row(ui, t, tl!("Spatial AQ"), |ui| {
-                    check(ui, reg, "export.video.spatialAq", &mut s.spatial_aq, "Enable spatial adaptive quantization");
+                    check(ui, reg, "export.video.spatialAq", &mut s.spatial_aq, tl!("Enable spatial adaptive quantization"));
                 });
                 row(ui, t, tl!("Lookahead"), |ui| {
                     let mut on = s.lookahead.is_some();
-                    if check(ui, reg, "export.video.lookaheadOn", &mut on, "") {
+                    if check(ui, reg, "export.video.lookaheadOn", &mut on, tl!("Enable lookahead frame analysis")) {
                         s.lookahead = on.then_some(16);
                     }
                     if let Some(la) = s.lookahead.as_mut() {

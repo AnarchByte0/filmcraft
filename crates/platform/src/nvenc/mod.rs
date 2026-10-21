@@ -179,7 +179,11 @@ pub fn hevc_available() -> bool {
             level: None,
             sar: None,
             bframes: false,
-            ..Default::default()
+            cqp: false,
+            qp: 23,
+            multipass: false,
+            spatial_aq: false,
+            lookahead: None,
         };
         let result = Nvenc::new(&probe);
         if let Err(why) = &result {
@@ -233,7 +237,11 @@ pub fn hevc_hdr_available() -> bool {
             level: None,
             sar: None,
             bframes: false,
-            ..Default::default()
+            cqp: false,
+            qp: 23,
+            multipass: false,
+            spatial_aq: false,
+            lookahead: None,
         };
         let result = Nvenc::with_signal(&probe, &Signal::default());
         if let Err(why) = &result {
