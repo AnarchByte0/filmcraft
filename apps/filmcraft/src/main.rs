@@ -81,7 +81,7 @@ fn main() -> eframe::Result {
     let logger = logging::install();
     // lossy, so a value that is not Unicode is reported like any other bad port instead of ignored
     let env_port = std::env::var_os("FILMCRAFT_CONTROL_PORT").map(|p| p.to_string_lossy().into_owned());
-    let launch = match args::parse(env_port, std::env::args().skip(1)) {
+    let launch = match args::parse(env_port, std::env::args_os().skip(1)) {
         Ok(Cli::Run(l)) => l,
         Ok(Cli::Help) => {
             tell(args::USAGE, false);
@@ -214,7 +214,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         }
         // voice-over recording reads the microphone through cpal
         session.voiceover.input = Some(Box::new(audio_in::CpalIn::new(&session.prefs.audio_hardware.device_class)));
-        let project = files.iter().find(|f| f.ends_with(".fcproj")).cloned();
+        let (project, media) = args::project_and_media(&files);
         if let Some(p) = project {
             if let Err(e) = session.execute("file.open", json!({"path": p})) {
                 log::error!("{e}");
@@ -236,7 +236,6 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         } else if demo {
             let _ = session.execute("file.openDemoProject", json!({}));
         }
-        let media: Vec<String> = files.iter().filter(|f| !f.ends_with(".fcproj")).cloned().collect();
         if !media.is_empty() {
             let _ = session.execute("file.import", json!({"paths": media}));
         }
@@ -285,15 +284,26 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 .map(|p| p.to_string_lossy().to_string())
         }));
         app.hooks.pick_save_as = Some(Box::new(|filter: &str, exts: &[&str], name: &str| {
-            rfd::FileDialog::new()
+            // a full path (Quick Export, Export mode) opens the dialog in its folder
+            let path = std::path::Path::new(name);
+            let mut dialog = rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t(filter), &file_filters::extensions(exts))
-                .set_file_name(name)
-                .save_file()
-                .map(|p| p.to_string_lossy().to_string())
+                .set_file_name(path.file_name().map_or(name.into(), |n| n.to_string_lossy()));
+            if let Some(dir) = path.parent().filter(|d| d.is_dir()) {
+                dialog = dialog.set_directory(dir);
+            }
+            dialog.save_file().map(|p| p.to_string_lossy().to_string())
         }));
         app.hooks.pick_folder = Some(Box::new(|| rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().to_string())));
         app.hooks.pick_folder_at =
             Some(Box::new(|dir: &str| rfd::FileDialog::new().set_directory(dir).pick_folder().map(|p| p.to_string_lossy().into_owned())));
+        // Linux: the XDG portal call blocks until the user chooses, which would stop the frame
+        // loop (GNOME offers to force-quit the window after about five seconds, #260). Show the
+        // dialog on its own thread instead; the app keeps running and acts on the answer.
+        #[cfg(target_os = "linux")]
+        {
+            app.hooks.run_dialog = Some(Box::new(run_dialog_off_thread));
+        }
         app.hooks.open_path = Some(Box::new(open_path));
         // Help menu, About and Discord links (#642): eframe is built without its `links`
         // feature, so `ctx.open_url` does nothing on the desktop. Detached, so a launcher
@@ -325,7 +335,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         {
             let (rx, update) = native_menu::install(&app, cc.egui_ctx.clone());
             app.command_inbox = Some(rx);
-            app.hooks.shortcuts_changed = Some(update);
+            app.hooks.menu_changed = Some(update);
             app.ui.show_menu_bar = false;
         }
         if let Some(port) = control_port {
@@ -428,6 +438,80 @@ fn agent_event_loop(agent: bool) -> Option<eframe::EventLoopBuilderHook> {
     None
 }
 
+/// Show `dialog` with rfd on a worker thread and answer on the returned channel (#260). Filter
+/// names are translated here, on the UI thread (the interface language is per thread). A dialog
+/// thread that can't start or panics drops the sender: the app takes that as cancelled.
+#[cfg(target_os = "linux")]
+fn run_dialog_off_thread(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) -> std::sync::mpsc::Receiver<Vec<String>> {
+    use filmcraft_ui_egui::native_dialogs::FileDialog;
+    let t = |s: &str| filmcraft_ui_egui::i18n::t(s).to_string();
+    let media = t("Media");
+    let project = t("FilmCraft Project");
+    let project_exts = project_patterns();
+    let dialog = prepare_dialog(dialog);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("file-dialog".into()).spawn(move || {
+        let shown = std::panic::catch_unwind(move || {
+            let path = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
+            match dialog {
+                FileDialog::OpenFiles { exts } => {
+                    rfd::FileDialog::new().add_filter(&media, &exts).pick_files().unwrap_or_default().into_iter().map(path).collect()
+                }
+                FileDialog::OpenFile { filter, exts } => rfd::FileDialog::new().add_filter(&filter, &exts).pick_file().map(path).into_iter().collect(),
+                FileDialog::Relink { exts, .. } => rfd::FileDialog::new().add_filter(&media, &exts).pick_file().map(path).into_iter().collect(),
+                FileDialog::OpenProject => rfd::FileDialog::new().add_filter(&project, &project_exts).pick_file().map(path).into_iter().collect(),
+                FileDialog::SaveProject { name } => {
+                    rfd::FileDialog::new().add_filter(&project, &project_exts).set_file_name(name).save_file().map(path).into_iter().collect()
+                }
+                FileDialog::SaveAs { filter, exts, name } => {
+                    rfd::FileDialog::new().add_filter(&filter, &exts).set_file_name(name).save_file().map(path).into_iter().collect()
+                }
+                FileDialog::Folder { at } => {
+                    let d = rfd::FileDialog::new();
+                    let d = match at {
+                        Some(dir) if !dir.is_empty() => d.set_directory(dir),
+                        _ => d,
+                    };
+                    d.pick_folder().map(path).into_iter().collect::<Vec<_>>()
+                }
+            }
+        });
+        match shown {
+            Ok(paths) => {
+                let _ = tx.send(paths);
+            }
+            Err(_) => log::warn!("the file dialog thread panicked; taken as cancelled"),
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("could not start the file dialog thread: {e}");
+    }
+    rx
+}
+
+/// A dialog as the Linux dialog thread shows it: filter names translated (here, on the UI thread:
+/// the interface language is per thread) and every extension list turned into the
+/// case-insensitive patterns the synchronous pickers use, so `CLIP.MP4` stays visible (#262).
+#[cfg(target_os = "linux")]
+fn prepare_dialog(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) -> filmcraft_ui_egui::native_dialogs::FileDialog {
+    use filmcraft_ui_egui::native_dialogs::FileDialog;
+    let t = |s: &str| filmcraft_ui_egui::i18n::t(s).to_string();
+    let patterns = |exts: Vec<String>| file_filters::extensions(&exts.iter().map(String::as_str).collect::<Vec<_>>());
+    match dialog {
+        FileDialog::OpenFiles { exts } => FileDialog::OpenFiles { exts: patterns(exts) },
+        FileDialog::OpenFile { filter, exts } => FileDialog::OpenFile { filter: t(&filter), exts: patterns(exts) },
+        FileDialog::SaveAs { filter, exts, name } => FileDialog::SaveAs { filter: t(&filter), exts: patterns(exts), name },
+        FileDialog::Relink { exts, hint } => FileDialog::Relink { exts: patterns(exts), hint },
+        other => other,
+    }
+}
+
+/// The project dialogs' filter patterns (`EDIT.FCPROJ` included).
+#[cfg(target_os = "linux")]
+fn project_patterns() -> Vec<String> {
+    file_filters::extensions(&["fcproj"])
+}
+
 #[cfg(test)]
 mod tests {
     /// Start-up registers the hardware decoders whether or not anything is logged (no logger is
@@ -440,5 +524,32 @@ mod tests {
         let expected = cfg!(any(target_os = "macos", target_os = "windows"))
             || (cfg!(target_os = "linux") && matches!(hardware, filmcraft_platform::Availability::Available(_)));
         assert_eq!(filmcraft_platform::registered(), expected, "{hardware:?}");
+    }
+
+    /// #262 on Linux: the dialogs shown off the UI thread (#260) filter with the same
+    /// case-insensitive patterns as the synchronous pickers, so upper- and mixed-case files show.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn off_thread_dialogs_keep_case_insensitive_filters() {
+        use filmcraft_ui_egui::RelinkHint;
+        use filmcraft_ui_egui::native_dialogs::FileDialog;
+        let mp4 = || vec!["mp4".to_string()];
+        let hint = RelinkHint { command: "media.relink".into(), params: serde_json::json!({}) };
+        for dialog in [
+            FileDialog::OpenFiles { exts: mp4() },
+            FileDialog::OpenFile { filter: "Media".into(), exts: mp4() },
+            FileDialog::SaveAs { filter: "Media".into(), exts: mp4(), name: "clip.mp4".into() },
+            FileDialog::Relink { exts: mp4(), hint },
+        ] {
+            let exts = match super::prepare_dialog(dialog) {
+                FileDialog::OpenFiles { exts } | FileDialog::OpenFile { exts, .. } | FileDialog::SaveAs { exts, .. } | FileDialog::Relink { exts, .. } => exts,
+                other => panic!("the dialog changed kind: {other:?}"),
+            };
+            assert_eq!(exts.first().map(String::as_str), Some("mp4"), "the literal extension stays first (save suffix)");
+            assert!(exts.iter().any(|e| e == "[mM][pP]4"), "{exts:?}");
+        }
+        let project = super::project_patterns();
+        assert_eq!(project.first().map(String::as_str), Some("fcproj"));
+        assert!(project.iter().any(|e| e == "[fF][cC][pP][rR][oO][jJ]"), "{project:?}");
     }
 }

@@ -248,6 +248,13 @@ fn register_hardware_decoders() -> filmcraft_platform::Availability {
     filmcraft_platform::register()
 }
 
+/// `path` made absolute against the working directory, as the project stores it. Unlike
+/// `canonicalize`, `std::path::absolute` keeps symlinks and adds no Windows verbatim `\\?\`
+/// prefix (#850). A path it cannot resolve is kept as given.
+fn absolute(path: &str) -> String {
+    std::path::absolute(path).ok().and_then(|p| p.into_os_string().into_string().ok()).unwrap_or_else(|| path.to_string())
+}
+
 #[tokio::main]
 async fn main() {
     cli().await;
@@ -257,7 +264,8 @@ async fn main() {
 }
 
 async fn cli() {
-    let a = Args::parse(std::env::args().skip(1));
+    // `std::env::args` panics on an argument that is not Unicode (a Linux file name in Latin-1)
+    let a = Args::parse(std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()));
     // `--help` anywhere (`filmcraft-cli --help`, `filmcraft-cli export --help`) prints the reference:
     // the parser takes it as a flag option, so it never reaches the subcommand match.
     if a.flag("--help") {
@@ -377,8 +385,7 @@ async fn cli() {
             print(&a, &v);
         }
         "import" => {
-            let paths: Vec<String> =
-                a.positionals[1..].iter().map(|p| std::fs::canonicalize(p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| p.clone())).collect();
+            let paths: Vec<String> = a.positionals.get(1..).unwrap_or_default().iter().map(|p| absolute(p)).collect();
             if paths.is_empty() {
                 usage("import <file>...");
             }
@@ -458,8 +465,8 @@ async fn cli() {
                 usage("render is headless; with --bridge use the MCP `render_frame` tool or `exec` ui commands");
             }
             let Backend::Local(mut s) = Backend::open(&a) else { usage("render is headless") };
-            let secs: f64 = a.opt("--seconds").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-            let scale: f32 = a.opt("--scale").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let secs: f64 = finite_opt(&a, "--seconds").unwrap_or(0.0);
+            let scale: f32 = finite_opt(&a, "--scale").unwrap_or(1.0);
             let out = a.opt("--out").unwrap_or("frame.png");
             s.set_playhead(filmcraft_time::Tick::from_seconds_f64(secs));
             let t0 = std::time::Instant::now();
@@ -541,6 +548,16 @@ fn check_offline(a: &Args, offline: &[Value], what: &str) {
     diag(format_args!("{}", offline_warning(offline)));
     if !a.flag("--allow-offline") {
         fail(format!("{what} has placeholder frames for offline media; relink it (exec media.relink …) or pass --allow-offline"));
+    }
+}
+
+/// A numeric option, or a usage error when it is not a finite number (so a typo never silently
+/// falls back to a default).
+fn finite_opt<T: std::str::FromStr + Copy + Into<f64>>(a: &Args, name: &str) -> Option<T> {
+    let v = a.opt(name)?;
+    match v.parse::<T>() {
+        Ok(n) if n.into().is_finite() => Some(n),
+        _ => usage(format!("{name}: expected a finite number, got `{v}`")),
     }
 }
 
@@ -646,6 +663,27 @@ mod format_tests {
         let mut p = json!({});
         super::set_custom_bounds(&mut p, None, None);
         assert!(p.get("range").is_none());
+    }
+
+    /// `import` used `canonicalize`, which resolves symlinks and on Windows stores `\\?\C:\…`
+    /// verbatim paths in the project (#850).
+    #[test]
+    fn imported_paths_are_absolute_without_resolving_links() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(super::absolute("clip.mov"), cwd.join("clip.mov").to_string_lossy());
+        assert!(!super::absolute("clip.mov").starts_with(r"\\?\"));
+        assert_eq!(super::absolute(""), "");
+        #[cfg(unix)]
+        {
+            let dir = std::env::temp_dir().join(format!("filmcraft-cli-abs-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("real.mov"), b"x").unwrap();
+            let link = dir.join("link.mov");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(dir.join("real.mov"), &link).unwrap();
+            assert_eq!(super::absolute(&link.to_string_lossy()), link.to_string_lossy());
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]
