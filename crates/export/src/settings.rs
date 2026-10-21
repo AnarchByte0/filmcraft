@@ -753,7 +753,7 @@ impl ExportSettings {
             "No audio".to_string()
         };
         let container = match self.format {
-            Format::H264 | Format::Hevc | Format::Av1 if self.multiplexer == Multiplexer::Mov => "QuickTime",
+            Format::H264 | Format::Hevc if self.multiplexer == Multiplexer::Mov => "QuickTime",
             Format::H264 | Format::Hevc | Format::Av1 => "MP4",
             Format::ProRes | Format::DnxHr | Format::Apv | Format::Mjpeg => "QuickTime",
             Format::MxfOp1a | Format::MxfOpAtom => self.mxf_video_codec.label(),

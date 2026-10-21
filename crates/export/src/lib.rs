@@ -258,17 +258,17 @@ impl Format {
     pub fn is_audio_only(self) -> bool {
         matches!(self, Format::Wav | Format::Aiff | Format::Aac | Format::Flac)
     }
-    /// H.264, H.265 or AV1: MPEG-4 (or QuickTime) with AAC audio, set up with the same bitrate controls.
+    /// H.264 or H.265: MPEG-4 (or QuickTime) with AAC audio, set up with the same bitrate controls.
     pub fn is_h26x(self) -> bool {
-        matches!(self, Format::H264 | Format::Hevc | Format::Av1)
+        matches!(self, Format::H264 | Format::Hevc)
     }
     /// A bitrate-controlled MPEG-4 video format with AAC audio: H.264, H.265 or AV1 (MPEG-4 only).
     pub fn is_mp4_video(self) -> bool {
         matches!(self, Format::H264 | Format::Hevc | Format::Av1)
     }
-    /// Whether the file is MPEG-4 rather than QuickTime for `mux`.
+    /// Whether the file is MPEG-4 rather than QuickTime for mux.
     pub fn is_mp4_with(self, mux: Multiplexer) -> bool {
-        self.is_mp4_video() && mux == Multiplexer::Mp4
+        self == Format::Av1 || (self.is_h26x() && mux == Multiplexer::Mp4)
     }
     pub const ALL: [Format; 21] = [
         Format::H264,

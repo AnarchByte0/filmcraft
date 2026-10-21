@@ -3,7 +3,7 @@
 use filmcraft_platform::nvenc::{Config, Nvenc, Profile, Signal};
 
 #[test]
-fn av1_export_round_trips_mp4_mov_sdr_pq_and_hlg() {
+fn av1_export_round_trips_mp4_sdr_pq_and_hlg() {
     use filmcraft_export::{ExportSettings, Format, Multiplexer, Progress, export};
     use filmcraft_media::generators::GeneratorSource;
     use filmcraft_media::{DemoScene, FrameRequest, Generator, MediaSource};
@@ -50,7 +50,7 @@ fn av1_export_round_trips_mp4_mov_sdr_pq_and_hlg() {
         let mut sources = filmcraft_render::SourceMap::default();
         sources.0.insert(clip, Arc::new(g));
         let p = Arc::new(p);
-        for (multiplexer, ext) in [(Multiplexer::Mp4, "mp4"), (Multiplexer::Mov, "mov")] {
+        for (multiplexer, ext) in [(Multiplexer::Mp4, "mp4")] {
             let path = filmcraft_testkit::temp_path(&filmcraft_testkit::fixtures_dir("nvenc-av1").join(format!("{}.{ext}", working.id())));
             let settings = ExportSettings {
                 format: Format::Av1,

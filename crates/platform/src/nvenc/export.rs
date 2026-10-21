@@ -154,25 +154,29 @@ impl VideoEncoder for NvencEncoder {
 fn config(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> std::result::Result<Config, String> {
     let hevc = format == Format::Hevc;
     let av1 = format == Format::Av1;
-    if !(format == Format::H264 || hevc || av1) || s.format.is_mxf() {
+    let wide = hevc || av1;
+    if !(format == Format::H264 || wide) || s.format.is_mxf() {
         return Err("only MP4 / MOV H.264, H.265 and AV1 exports".into());
     }
+    if av1 && s.multiplexer == filmcraft_export::Multiplexer::Mov {
+        return Err("AV1 exports are supported in MP4 container only".into());
+    }
     let hdr = s.signal.is_hdr();
-    if hdr && !(hevc || av1) {
+    if hdr && !wide {
         return Err("HDR (8-bit H.264 here carries it with software signalling)".into());
     }
     // HEVC / AV1: BT.709 SDR (Main) or BT.2020 NCL with PQ / HLG (Main 10); any other description is not written
-    if (hevc || av1) && (hdr && (s.signal.primaries != 9 || s.signal.matrix != 9) || !hdr && s.signal != ColorSignal::default()) {
+    if wide && (hdr && (s.signal.primaries != 9 || s.signal.matrix != 9) || !hdr && s.signal != ColorSignal::default()) {
         return Err(format!("the colour signal {:?} (H.265 and AV1 here are BT.709, or BT.2020 with PQ / HLG)", s.signal));
     }
-    if !matches!(s.h264_pass, H264Pass::Single) || ((hevc || av1) && s.bitrate_mode == BitrateMode::Vbr2Pass) {
+    if !matches!(s.h264_pass, H264Pass::Single) || (wide && s.bitrate_mode == BitrateMode::Vbr2Pass) {
         return Err("two-pass VBR".into());
     }
     if s.bitrate_mode == BitrateMode::Crf {
         return Err("CRF (constant quality)".into());
     }
     // the hardware path writes the aspect ratio of H.264 only
-    if (hevc || av1) && s.pixel_aspect.is_some_and(|(n, d)| n != d) {
+    if wide && s.pixel_aspect.is_some_and(|(n, d)| n != d) {
         return Err("non-square pixels".into());
     }
     if s.field_order != FieldOrder::Progressive {
@@ -210,7 +214,7 @@ fn config(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -
             (false, false, H264Profile::High) => Profile::High,
         },
         // the H.264 level setting means nothing for H.265 / AV1: the encoder picks the level
-        level: if hevc || av1 { None } else { s.h264_level },
+        level: if wide { None } else { s.h264_level },
         sar: s.pixel_aspect,
         bframes: true,
     })

@@ -432,7 +432,7 @@ impl Session {
                     if p.ten_bit {
                         a.flags |= (2 << AV1_INPUT_DEPTH_SHIFT) | (2 << AV1_OUTPUT_DEPTH_SHIFT);
                     }
-                    a.idrPeriod = p.gop;
+                    a.idrPeriod = p.gop.max(1);
                     a.colorPrimaries = u32::from(p.signal.primaries);
                     a.transferCharacteristics = u32::from(p.signal.transfer);
                     a.matrixCoefficients = u32::from(p.signal.matrix);

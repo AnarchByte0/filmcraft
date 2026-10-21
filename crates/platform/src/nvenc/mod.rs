@@ -580,7 +580,7 @@ impl Nvenc {
         let r = self.session.read(slot);
         self.free.push(slot);
         let o = r?;
-        let key = o.pic_type == ffi::NV_ENC_PIC_TYPE_IDR || (self.codec == Codec::Av1 && o.pic_type == ffi::NV_ENC_PIC_TYPE_I);
+        let key = o.pic_type == ffi::NV_ENC_PIC_TYPE_IDR;
         let data = match self.codec {
             Codec::Av1 if key && !self.av1_metadata.is_empty() => av1::insert_metadata(&o.data, &self.av1_metadata)?,
             Codec::Av1 => o.data,
