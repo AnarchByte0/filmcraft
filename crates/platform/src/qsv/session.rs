@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFMediaBuffer, IMFMediaType, IMFSample, IMFTransform, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MFMediaType_Video, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT,
-    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_REGISTER_TYPE_INFO, MFVideoFormat_AV1, MFVideoFormat_H264,
-    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoInterlace_Progressive,
+    IMFActivate, IMFMediaBuffer, IMFMediaType, IMFSample, IMFTransform, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_MT_AVG_BITRATE,
+    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MFMediaType_Video,
+    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
+    MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_REGISTER_TYPE_INFO, MFVideoFormat_AV1,
+    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoInterlace_Progressive,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -212,7 +213,16 @@ impl QsvSession {
 
         // SAFETY: ProcessInput on live transform.
         unsafe {
-            self.transform.ProcessInput(0, &sample, 0).map_err(|e| format!("Intel encoder ProcessInput failed: {e}"))?;
+            let hr = self.transform.ProcessInput(0, &sample, 0);
+            if let Err(e) = hr {
+                if e.code() == MF_E_NOTACCEPTING {
+                    // Queue is full: drain pending outputs first and retry
+                    let _ = self.drain_outputs();
+                    self.transform.ProcessInput(0, &sample, 0).map_err(|e| format!("Intel encoder ProcessInput failed: {e}"))?;
+                } else {
+                    return Err(format!("Intel encoder ProcessInput failed: {e}"));
+                }
+            }
         }
 
         self.drain_outputs()
@@ -242,8 +252,13 @@ impl QsvSession {
             // SAFETY: ProcessOutput call.
             let hr = unsafe { self.transform.ProcessOutput(0, std::slice::from_mut(&mut out_buffer), &mut status) };
 
-            if hr.is_err() {
-                break;
+            match hr {
+                Ok(()) => {}
+                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => break,
+                Err(e) => {
+                    log::debug!("Intel ProcessOutput ended: {e}");
+                    break;
+                }
             }
 
             if let Some(sample) = out_buffer.pSample.as_ref() {
@@ -387,25 +402,27 @@ unsafe fn read_sample_bytes(sample: &IMFSample) -> Result<Vec<u8>, String> {
 fn is_key_frame(codec: Codec, data: &[u8]) -> bool {
     match codec {
         Codec::H264 => {
-            // NAL type 5 is IDR
-            for window in data.windows(4) {
-                if window == [0, 0, 0, 1]
-                    && let Some(&b) = data.get(4)
-                    && (b & 0x1F) == 5
+            // NAL type 5 is IDR. Scan for 3- or 4-byte start codes (00 00 01)
+            for i in 0..data.len().saturating_sub(3) {
+                if data[i..i + 3] == [0, 0, 1]
+                    && let Some(&b) = data.get(i + 3)
                 {
-                    return true;
+                    let nal_type = b & 0x1F;
+                    if nal_type == 5 {
+                        return true;
+                    }
                 }
             }
             false
         }
         Codec::Hevc => {
-            // NAL types 19 and 20 are IDR
-            for i in 0..data.len().saturating_sub(4) {
-                if data[i..i + 4] == [0, 0, 0, 1]
-                    && let Some(&b) = data.get(i + 4)
+            // NAL types 19 (IDR_W_RADL), 20 (IDR_N_LP), 21 (CRA_NUT) are key/RAP
+            for i in 0..data.len().saturating_sub(3) {
+                if data[i..i + 3] == [0, 0, 1]
+                    && let Some(&b) = data.get(i + 3)
                 {
                     let nal_type = (b >> 1) & 0x3F;
-                    if nal_type == 19 || nal_type == 20 {
+                    if nal_type == 19 || nal_type == 20 || nal_type == 21 {
                         return true;
                     }
                 }
@@ -413,10 +430,95 @@ fn is_key_frame(codec: Codec, data: &[u8]) -> bool {
             false
         }
         Codec::Av1 => {
-            // OBU keyframe check
-            true
+            // Parse OBUs: check for sequence header (1) or frame header with key_frame (3, 6)
+            let mut pos = 0usize;
+            while pos < data.len() {
+                let b0 = data[pos];
+                if (b0 >> 7) & 1 != 0 {
+                    break;
+                }
+                let obu_type = (b0 >> 3) & 0x0F;
+                let extension_flag = (b0 >> 2) & 1;
+                let has_size = (b0 >> 1) & 1;
+                pos += 1;
+                if extension_flag != 0 {
+                    if pos >= data.len() {
+                        break;
+                    }
+                    pos += 1;
+                }
+                let payload_start = if has_size != 0 {
+                    let mut payload_len = 0usize;
+                    let mut shift = 0;
+                    let mut valid = false;
+                    while pos < data.len() {
+                        let b = data[pos];
+                        pos += 1;
+                        payload_len |= ((b & 0x7F) as usize) << shift;
+                        shift += 7;
+                        if (b & 0x80) == 0 {
+                            valid = true;
+                            break;
+                        }
+                    }
+                    if !valid {
+                        break;
+                    }
+                    let start = pos;
+                    pos = pos.saturating_add(payload_len);
+                    start
+                } else {
+                    let start = pos;
+                    pos = data.len();
+                    start
+                };
+
+                if obu_type == 1 {
+                    return true;
+                }
+                if (obu_type == 3 || obu_type == 6)
+                    && let Some(&p0) = data.get(payload_start)
+                {
+                    let show_existing_frame = (p0 >> 7) & 1;
+                    let frame_type = (p0 >> 5) & 3;
+                    if show_existing_frame == 0 && frame_type == 0 {
+                        return true;
+                    }
+                }
+            }
+            false
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn is_intel_activate(a: &IMFActivate) -> bool {
+    // SAFETY: COM calls on activate object to read attributes.
+    unsafe {
+        let mut s = windows::core::PWSTR::null();
+        let mut len = 0u32;
+        if a.GetAllocatedString(&MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, &mut s, &mut len).is_ok() {
+            let res = s.to_string().ok();
+            CoTaskMemFree(Some(s.0 as *const c_void));
+            if let Some(v) = res {
+                let lower = v.to_ascii_lowercase();
+                if lower.contains("8086") {
+                    return true;
+                }
+            }
+        }
+        if a.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut s, &mut len).is_ok() {
+            let res = s.to_string().ok();
+            CoTaskMemFree(Some(s.0 as *const c_void));
+            if let Some(name) = res {
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("intel") || lower.contains("quick sync") || lower.contains("qsv") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(target_os = "windows")]
@@ -429,13 +531,71 @@ pub fn find_encoder_activate(api: &MfApi, subtype: GUID) -> Result<Option<IMFAct
     if hr.is_err() || list.is_null() || count == 0 {
         return Ok(None);
     }
-    // Take the first matching hardware encoder
-    // SAFETY: take ownership of IMFActivate returned from MFTEnumEx.
-    let activate = unsafe {
-        let p = *list;
-        if !p.is_null() { Some(IMFActivate::from_raw(p)) } else { None }
-    };
+    // Filter for Intel hardware encoder, properly taking ownership of COM activate objects
+    let mut selected = None;
+    for i in 0..count as usize {
+        // SAFETY: pointer offset is within 0..count elements allocated by MFTEnumEx.
+        let p = unsafe { *list.add(i) };
+        if p.is_null() {
+            continue;
+        }
+        // SAFETY: take ownership of IMFActivate pointer from MFTEnumEx array.
+        let activate = unsafe { IMFActivate::from_raw(p) };
+        if selected.is_none() && is_intel_activate(&activate) {
+            selected = Some(activate);
+        }
+    }
     // SAFETY: free list array allocated with CoTaskMemAlloc.
     unsafe { CoTaskMemFree(Some(list as *const c_void)) };
-    Ok(activate)
+    Ok(selected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_frame_detection_h264() {
+        // NAL 5 = IDR
+        let idr = [0, 0, 0, 1, 0x65, 0x88, 0x84];
+        assert!(is_key_frame(Codec::H264, &idr));
+        // NAL 1 = Non-IDR slice
+        let non_idr = [0, 0, 0, 1, 0x61, 0x88, 0x84];
+        assert!(!is_key_frame(Codec::H264, &non_idr));
+        // 3-byte start code
+        let idr_3 = [0, 0, 1, 0x65, 0x12];
+        assert!(is_key_frame(Codec::H264, &idr_3));
+    }
+
+    #[test]
+    fn key_frame_detection_hevc() {
+        // NAL 19 = IDR_W_RADL (0x26 = (19 << 1))
+        let idr19 = [0, 0, 0, 1, 0x26, 0x01];
+        assert!(is_key_frame(Codec::Hevc, &idr19));
+        // NAL 20 = IDR_N_LP (0x28 = (20 << 1))
+        let idr20 = [0, 0, 0, 1, 0x28, 0x01];
+        assert!(is_key_frame(Codec::Hevc, &idr20));
+        // NAL 21 = CRA_NUT (0x2A = (21 << 1))
+        let cra21 = [0, 0, 0, 1, 0x2A, 0x01];
+        assert!(is_key_frame(Codec::Hevc, &cra21));
+        // NAL 1 = TRAIL_R (0x02 = (1 << 1))
+        let non_idr = [0, 0, 0, 1, 0x02, 0x01];
+        assert!(!is_key_frame(Codec::Hevc, &non_idr));
+    }
+
+    #[test]
+    fn key_frame_detection_av1() {
+        // OBU Sequence Header (type 1)
+        // b0: (1 << 3) | 2 (has_size = 1) -> 0x0A
+        let seq_obu = [0x0A, 0x01, 0x00];
+        assert!(is_key_frame(Codec::Av1, &seq_obu));
+        // OBU Frame (type 6) with key_frame:
+        // b0: (6 << 3) | 2 -> 0x32, size 1, payload: show_existing=0, type=0 -> 0x00
+        let frame_key = [0x32, 0x01, 0x00];
+        assert!(is_key_frame(Codec::Av1, &frame_key));
+        // OBU Frame with inter frame:
+        // payload: show_existing=0, type=1 -> (1 << 5) = 0x20
+        let frame_inter = [0x32, 0x01, 0x20];
+        assert!(!is_key_frame(Codec::Av1, &frame_inter));
+    }
 }

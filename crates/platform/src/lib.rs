@@ -73,13 +73,6 @@ pub fn register() -> Availability {
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     {
         filmcraft_export::register_encoder(nvenc::export::factory);
-        filmcraft_export::register_encoder(qsv::export::factory);
-        filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, qsv::hevc_available);
-        filmcraft_export::register_format_probe(filmcraft_export::Format::Av1, qsv::av1_available);
-        filmcraft_export::register_hdr_probe(filmcraft_export::Format::Hevc, qsv::hevc_hdr_available);
-        filmcraft_export::register_hdr_probe(filmcraft_export::Format::Av1, qsv::av1_hdr_available);
-        qsv::warm_hevc_probe();
-        qsv::warm_av1_probe();
     }
     #[cfg(target_os = "macos")]
     {
@@ -112,10 +105,11 @@ pub fn register() -> Availability {
     #[cfg(target_os = "windows")]
     {
         static ENCODERS: std::sync::Once = std::sync::Once::new();
-        // Hardware encoders (NVENC and Intel QSV) in front of the software encoder
+        // Hardware encoders (NVENC and Intel QSV) in front of the software encoder.
+        // QSV is registered before NVENC so NVENC is tried first on hybrid Intel+NVIDIA systems.
         ENCODERS.call_once(|| {
-            filmcraft_export::register_encoder(nvenc::export::factory);
             filmcraft_export::register_encoder(qsv::export::factory);
+            filmcraft_export::register_encoder(nvenc::export::factory);
         });
         filmcraft_codecs::register_video_decoder(media_foundation_factory);
         filmcraft_codecs::hw::set_hw_backend("Media Foundation");

@@ -17,6 +17,7 @@ pub struct QsvEncoder {
     h: u32,
     rate: FrameRate,
     signal: ColorSignal,
+    ten_bit: bool,
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
@@ -26,10 +27,11 @@ pub struct QsvEncoder {
     sps: Vec<u8>,
     pps: Vec<u8>,
     vps: Vec<u8>,
+    av1_seq_header: Vec<u8>,
 }
 
 impl QsvEncoder {
-    fn new(session: QsvSession, codec: Codec, w: u32, h: u32, rate: FrameRate, signal: ColorSignal) -> Self {
+    fn new(session: QsvSession, codec: Codec, w: u32, h: u32, rate: FrameRate, signal: ColorSignal, ten_bit: bool) -> Self {
         Self {
             session,
             codec,
@@ -37,6 +39,7 @@ impl QsvEncoder {
             h,
             rate,
             signal,
+            ten_bit,
             y: Vec::new(),
             u: Vec::new(),
             v: Vec::new(),
@@ -46,6 +49,7 @@ impl QsvEncoder {
             sps: Vec::new(),
             pps: Vec::new(),
             vps: Vec::new(),
+            av1_seq_header: Vec::new(),
         }
     }
 
@@ -57,52 +61,125 @@ impl QsvEncoder {
         for p in ps {
             self.extract_headers(&p.data);
             let comp_offset = i32::try_from((p.pts.saturating_sub(p.dts)).saturating_mul(den)).unwrap_or(0);
-            out.push(EncodedPacket { data: p.data, key: p.key, duration, composition_offset: comp_offset });
+            let data = match self.codec {
+                Codec::H264 => {
+                    crate::nvenc::annex_b_to_length_prefixed_for(crate::nvenc::Codec::H264, &p.data)
+                        .unwrap_or(p.data)
+                }
+                Codec::Hevc => {
+                    crate::nvenc::annex_b_to_length_prefixed_for(crate::nvenc::Codec::Hevc, &p.data)
+                        .unwrap_or(p.data)
+                }
+                Codec::Av1 => p.data,
+            };
+            out.push(EncodedPacket { data, key: p.key, duration, composition_offset: comp_offset });
         }
         out
     }
 
     fn extract_headers(&mut self, data: &[u8]) {
-        // Parse Annex B NALs to extract parameter sets for SampleEntry
-        let mut i = 0usize;
-        let mut nal_starts = Vec::new();
-        while let Some(w) = data.get(i..i.saturating_add(4)) {
-            if w == [0, 0, 0, 1] {
-                nal_starts.push(i + 4);
-                i += 4;
-            } else {
-                i += 1;
-            }
-        }
-        for (idx, &start) in nal_starts.iter().enumerate() {
-            let end = nal_starts.get(idx + 1).copied().unwrap_or(data.len());
-            let mut end_clean = end;
-            while end_clean > start && data.get(end_clean.saturating_sub(1)) == Some(&0) {
-                end_clean -= 1;
-            }
-            if let Some(nal) = data.get(start..end_clean)
-                && let Some(&first) = nal.first()
-            {
-                match self.codec {
-                    Codec::H264 => {
-                        let nal_type = first & 0x1F;
-                        if nal_type == 7 && self.sps.is_empty() {
-                            self.sps = nal.to_vec();
-                        } else if nal_type == 8 && self.pps.is_empty() {
-                            self.pps = nal.to_vec();
+        match self.codec {
+            Codec::H264 | Codec::Hevc => {
+                // Parse Annex B NALs to extract parameter sets for SampleEntry
+                let mut i = 0usize;
+                let mut nal_starts = Vec::new();
+                while let Some(w) = data.get(i..i.saturating_add(4)) {
+                    if w == [0, 0, 0, 1] {
+                        nal_starts.push(i + 4);
+                        i += 4;
+                    } else if i + 3 <= data.len() && data[i..i + 3] == [0, 0, 1] {
+                        nal_starts.push(i + 3);
+                        i += 3;
+                    } else {
+                        i += 1;
+                    }
+                }
+                for (idx, &start) in nal_starts.iter().enumerate() {
+                    let end = nal_starts.get(idx + 1).copied().unwrap_or(data.len());
+                    let mut end_clean = end;
+                    while end_clean > start && data.get(end_clean.saturating_sub(1)) == Some(&0) {
+                        end_clean -= 1;
+                    }
+                    if let Some(nal) = data.get(start..end_clean)
+                        && let Some(&first) = nal.first()
+                    {
+                        match self.codec {
+                            Codec::H264 => {
+                                let nal_type = first & 0x1F;
+                                if nal_type == 7 && self.sps.is_empty() {
+                                    self.sps = nal.to_vec();
+                                } else if nal_type == 8 && self.pps.is_empty() {
+                                    self.pps = nal.to_vec();
+                                }
+                            }
+                            Codec::Hevc => {
+                                let nal_type = (first >> 1) & 0x3F;
+                                if nal_type == 32 && self.vps.is_empty() {
+                                    self.vps = nal.to_vec();
+                                } else if nal_type == 33 && self.sps.is_empty() {
+                                    self.sps = nal.to_vec();
+                                } else if nal_type == 34 && self.pps.is_empty() {
+                                    self.pps = nal.to_vec();
+                                }
+                            }
+                            Codec::Av1 => {}
                         }
                     }
-                    Codec::Hevc => {
-                        let nal_type = (first >> 1) & 0x3F;
-                        if nal_type == 32 && self.vps.is_empty() {
-                            self.vps = nal.to_vec();
-                        } else if nal_type == 33 && self.sps.is_empty() {
-                            self.sps = nal.to_vec();
-                        } else if nal_type == 34 && self.pps.is_empty() {
-                            self.pps = nal.to_vec();
-                        }
+                }
+            }
+            Codec::Av1 => {
+                if !self.av1_seq_header.is_empty() {
+                    return;
+                }
+                let mut pos = 0usize;
+                while pos < data.len() {
+                    let b0 = data[pos];
+                    if (b0 >> 7) & 1 != 0 {
+                        break;
                     }
-                    Codec::Av1 => {}
+                    let obu_type = (b0 >> 3) & 0x0F;
+                    let extension_flag = (b0 >> 2) & 1;
+                    let has_size = (b0 >> 1) & 1;
+                    let start_pos = pos;
+                    pos += 1;
+                    if extension_flag != 0 {
+                        if pos >= data.len() {
+                            break;
+                        }
+                        pos += 1;
+                    }
+                    if has_size != 0 {
+                        let mut payload_len = 0usize;
+                        let mut shift = 0;
+                        let mut valid = false;
+                        while pos < data.len() {
+                            let b = data[pos];
+                            pos += 1;
+                            payload_len |= ((b & 0x7F) as usize) << shift;
+                            shift += 7;
+                            if (b & 0x80) == 0 {
+                                valid = true;
+                                break;
+                            }
+                        }
+                        if !valid {
+                            break;
+                        }
+                        let end_pos = pos.saturating_add(payload_len);
+                        if end_pos > data.len() {
+                            break;
+                        }
+                        if obu_type == 1 {
+                            self.av1_seq_header = data[start_pos..end_pos].to_vec();
+                            break;
+                        }
+                        pos = end_pos;
+                    } else {
+                        if obu_type == 1 {
+                            self.av1_seq_header = data[start_pos..].to_vec();
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -151,13 +228,47 @@ impl VideoEncoder for QsvEncoder {
                 SampleEntry::avc(AvcConfig::new(vec![sps], vec![pps], 4), w, h)
             }
             Codec::Hevc => {
-                let mut e = SampleEntry::hevc(filmcraft_isobmff::HevcConfig::default(), w, h);
-                self.signal.apply_to(&mut e, false);
+                let bit_depth = if self.ten_bit { 10 } else { 8 };
+                let hvcc = if !self.vps.is_empty() && !self.sps.is_empty() && !self.pps.is_empty() {
+                    crate::nvenc::hevc::hevc_config(&self.vps, &self.sps, &self.pps, (self.w, self.h), bit_depth)
+                        .unwrap_or_else(|_| filmcraft_isobmff::HevcConfig {
+                            general_profile_idc: if bit_depth == 10 { 2 } else { 1 },
+                            general_level_idc: 120,
+                            chroma_format_idc: 1,
+                            bit_depth_luma: bit_depth,
+                            bit_depth_chroma: bit_depth,
+                            ..Default::default()
+                        })
+                } else {
+                    filmcraft_isobmff::HevcConfig {
+                        general_profile_idc: if bit_depth == 10 { 2 } else { 1 },
+                        general_level_idc: 120,
+                        chroma_format_idc: 1,
+                        bit_depth_luma: bit_depth,
+                        bit_depth_chroma: bit_depth,
+                        ..Default::default()
+                    }
+                };
+                let mut e = SampleEntry::hevc(hvcc, w, h);
+                if self.signal.is_hdr() {
+                    self.signal.apply_to(&mut e, false);
+                }
                 e
             }
             Codec::Av1 => {
-                let mut e = SampleEntry::av1(filmcraft_isobmff::Av1Config::default(), w, h);
-                self.signal.apply_to(&mut e, false);
+                let av1_cfg = filmcraft_isobmff::Av1Config {
+                    seq_profile: 0,
+                    seq_level_idx_0: 8, // Level 4.0
+                    high_bitdepth: self.ten_bit,
+                    chroma_subsampling_x: true,
+                    chroma_subsampling_y: true,
+                    config_obus: self.av1_seq_header.clone(),
+                    ..Default::default()
+                };
+                let mut e = SampleEntry::av1(av1_cfg, w, h);
+                if self.signal.is_hdr() {
+                    self.signal.apply_to(&mut e, false);
+                }
                 e
             }
         }
@@ -205,5 +316,5 @@ pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettin
     };
 
     filmcraft_export::note_hw_encode_session();
-    Some(Ok(Box::new(QsvEncoder::new(session, codec, w, h, rate, s.signal))))
+    Some(Ok(Box::new(QsvEncoder::new(session, codec, w, h, rate, s.signal, is_hdr))))
 }

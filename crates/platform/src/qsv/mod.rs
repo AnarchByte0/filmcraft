@@ -53,16 +53,40 @@ pub fn av1_hdr_available() -> bool {
     *AV1_HDR_AVAILABLE.get_or_init(|| probe_codec_av1(true))
 }
 
-/// Warm up HEVC probes asynchronously or on background thread.
+/// Ask [`hevc_available`] on a thread of its own (once, however often this is called).
 pub fn warm_hevc_probe() {
-    let _ = hevc_available();
-    let _ = hevc_hdr_available();
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let spawned = std::thread::Builder::new().name("qsv-hevc-probe".into()).spawn(|| {
+            if std::panic::catch_unwind(hevc_available).is_err() {
+                log::warn!("the hardware QSV HEVC probe panicked; the format list will ask again");
+            }
+            if std::panic::catch_unwind(hevc_hdr_available).is_err() {
+                log::warn!("the hardware QSV HEVC Main 10 probe panicked; the export will ask again");
+            }
+        });
+        if let Err(e) = spawned {
+            log::info!("hardware QSV HEVC probe thread not started: {e}");
+        }
+    });
 }
 
-/// Warm up AV1 probes asynchronously.
+/// Ask [`av1_available`] on a thread of its own (once, however often this is called).
 pub fn warm_av1_probe() {
-    let _ = av1_available();
-    let _ = av1_hdr_available();
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let spawned = std::thread::Builder::new().name("qsv-av1-probe".into()).spawn(|| {
+            if std::panic::catch_unwind(av1_available).is_err() {
+                log::warn!("the hardware QSV AV1 probe panicked; the format list will ask again");
+            }
+            if std::panic::catch_unwind(av1_hdr_available).is_err() {
+                log::warn!("the hardware QSV AV1 Main 10 probe panicked; the export will ask again");
+            }
+        });
+        if let Err(e) = spawned {
+            log::info!("hardware QSV AV1 probe thread not started: {e}");
+        }
+    });
 }
 
 #[cfg(target_os = "windows")]
