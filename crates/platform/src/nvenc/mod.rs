@@ -345,7 +345,8 @@ impl Nvenc {
             sar: cfg.sar,
             bframes,
         };
-        session.initialize(&params, RING)?;
+        let ring = if let Some(la) = cfg.lookahead && la > 0 { (la as usize + 8).max(RING) } else { RING };
+        session.initialize(&params, ring)?;
         let params = session.sequence_params()?;
         let (vps, sps, pps, hvcc) = match codec {
             Codec::H264 => {
