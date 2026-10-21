@@ -232,6 +232,9 @@
 	Normalize Mix Track…	Normaliser la piste de mixage…
 	Offline File…	Fichier hors ligne…
 	Open Project…	Ouvrir un projet…
+	Open Recent	Ouvrir un fichier récent
+	Clear Recent Files	Effacer la liste des fichiers récents
+	Recent	Récents
 	Optical Flow	Flux optique
 	Overwrite	Écraser
 	Paste	Coller
@@ -284,6 +287,7 @@
 	Review	Révision
 	Right	Droite
 	Ripple Delete	Supprimer avec décalage
+	Ripple Delete Head Frame	Supprimer le début avec décalage
 	Ripple Sequence Markers	Décaler les marqueurs de séquence
 	Rose	Rose
 	Safe Margins	Marges de sécurité
@@ -1262,6 +1266,7 @@
 	59.94 fps Non Drop-Frame	59,94 fps non-drop frame
 	ASC CDL	ASC CDL
 	Accessible color contrast	Contraste des couleurs accessible
+	Animate zoom, scrolling and menus	Animer le zoom, le défilement et les menus
 	Action-Safe Margin	Marge de sécurité de l'action
 	Active Monitor	Moniteur actif
 	Add	Ajouter
@@ -2922,6 +2927,10 @@
 	Sample Size	Taille d'échantillon
 	16 bit	16 bits
 	24 bit	24 bits
+	32 bit	32 bits
+	32 bit float	32 bits à virgule flottante
+	FLAC stores whole-number samples only	FLAC ne stocke que des échantillons entiers
+	MXF export writes integer PCM only	L’export MXF n’écrit que du PCM entier
 	Size / Opacity	Taille / opacité
 	Image Overlay	Superposition d'image
 	PNG or JPEG file	Fichier PNG ou JPEG
@@ -3413,6 +3422,7 @@
 	in	entrée
 	The language changed but could not be saved: {e}	La langue a été changée mais n'a pas pu être enregistrée : {e}
 	no Chinese font is installed on this system; the interface stays in English	aucune police chinoise n'est installée sur ce système ; l'interface reste en anglais
+	no Korean font is installed on this system; the interface stays in English	aucune police coréenne n'est installée sur ce système ; l'interface reste en anglais
 	no Japanese font is installed on this system; the interface stays in English	aucune police japonaise n'est installée sur ce système ; l'interface reste en anglais
 	Show	Afficher
 	Sort	Trier
@@ -3568,3 +3578,9 @@
 	Export the labels to a preset file…	Exporter les étiquettes dans un fichier de paramètre prédéfini…
 	Show the presets folder	Afficher le dossier des paramètres prédéfinis
 	Delete this preset	Supprimer ce paramètre prédéfini
+# View ▸ Reset Interface Zoom (#2253).
+	Reset Interface Zoom	Réinitialiser le zoom de l'interface
+	Track Color	Couleur de la piste
+	Open a sequence to search its graphics	Ouvrez une séquence pour rechercher dans ses graphiques
+	No text graphics in this sequence. Add text with the Type tool.	Aucun graphique avec du texte dans cette séquence. Ajoutez du texte avec l'outil Texte.
+	No matching text.	Aucun texte ne correspond.

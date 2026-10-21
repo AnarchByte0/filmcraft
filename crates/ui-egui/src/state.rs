@@ -436,6 +436,10 @@ pub struct UiState {
     pub dock: DockNode,
     #[serde(default)]
     pub floating: Vec<crate::dock::Floating>,
+    /// Where each panel closed while floating was ([x, y, width, height]): opening it again
+    /// brings it back there, floating, instead of docked (#1985).
+    #[serde(default)]
+    pub closed_floating: Vec<(PanelKind, [f32; 4])>,
     /// Focused panel (blue outline, receives shortcuts).
     pub focused: PanelKind,
     pub timeline: TimelineView,
@@ -468,6 +472,10 @@ pub struct UiState {
     pub show_scopes: bool,
     /// Transient status line shown in the footer.
     pub status: String,
+    /// A link the web browser couldn't open, shown with its address until closed
+    /// ([`crate::links::show_failed`]).
+    #[serde(default)]
+    pub failed_link: Option<crate::links::FailedLink>,
     /// The colour parameter an armed eyedropper will fill with the next pixel clicked in the Program
     /// monitor (Esc or a click elsewhere disarms it). Never saved.
     #[serde(skip)]
@@ -956,6 +964,7 @@ impl Default for UiState {
             mode: Mode::Edit,
             workspace: "Editing".into(),
             floating: vec![],
+            closed_floating: vec![],
             dock: crate::dock::workspace("Editing"),
             focused: PanelKind::Timeline,
             timeline: TimelineView::default(),
@@ -974,6 +983,7 @@ impl Default for UiState {
             dark: true,
             show_scopes: false,
             status: String::new(),
+            failed_link: None,
             eyedropper: None,
             keyframe_selection: Vec::new(),
             essential_sound_tab: "Edit".into(),

@@ -34,7 +34,7 @@ pub const PREFS_VERSION: u32 = 2;
 #[serde(rename_all = "camelCase", default)]
 pub struct GeneralPrefs {
     /// Interface language (persisted independently of projects): `en`, `ja`, `es`, `pt-br`, `uk`,
-    /// `zh-cn`, `de`, `ru`, `fr`, `id`, or `system` (the default: the operating system's preferred language when the
+    /// `zh-cn`, `de`, `ru`, `fr`, `id`, `it`, or `system` (the default: the operating system's preferred language when the
     /// interface has it, otherwise English).
     pub interface_language: String,
     /// "At Startup": `showHome` (FilmCraft: the demo project), `openMostRecent`, `emptyProject`.
@@ -109,6 +109,9 @@ pub struct AppearancePrefs {
     /// "UI Scale": `auto` (default: the scale the operating system reports) or a fixed
     /// percentage of [`UI_SCALES`] (`100` = one point per physical pixel).
     pub ui_scale: String,
+    /// "Animate zoom, scrolling and menus" (#2325): off, the Timeline zooms and scrolls in one
+    /// step and menus, collapsing sections and tooltips appear without a fade.
+    pub animations: bool,
 }
 
 impl Default for AppearancePrefs {
@@ -122,6 +125,7 @@ impl Default for AppearancePrefs {
             accessible_contrast: false,
             highlight_color: DEFAULT_HIGHLIGHT.into(),
             ui_scale: "auto".into(),
+            animations: true,
         }
     }
 }
@@ -1007,6 +1011,8 @@ static CATEGORIES: &[Category] = &[
                     ("ru", "Русский"),
                     ("fr", "Français"),
                     ("id", "Bahasa Indonesia"),
+                    ("it", "Italiano"),
+                    ("ko", "한국어"),
                 ]),
                 true,
             ),
@@ -1051,6 +1057,7 @@ static CATEGORIES: &[Category] = &[
             b("appearance.accessibleContrast", "Accessible color contrast", true),
             f("appearance.highlightColor", "Highlight Color", Kind::Color, true),
             f("appearance.uiScale", "UI Scale", Kind::Choice(UI_SCALES), true),
+            b("appearance.animations", "Animate zoom, scrolling and menus", true),
         ],
     },
     Category {

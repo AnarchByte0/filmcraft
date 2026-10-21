@@ -39,6 +39,9 @@ pub mod credits;
 pub mod dock;
 mod dock_shared;
 mod dock_ui;
+/// Thumbnail textures kept before the least recently used are freed (each is up to 320 px wide).
+const MAX_THUMB_TEXTURES: usize = 512;
+
 pub mod frames;
 pub mod graphics_notice;
 pub mod header;
@@ -289,6 +292,9 @@ pub struct FilmcraftApp {
     pub auto: automation::Registry,
     /// Named textures (monitors, thumbnails) with the key they show.
     textures: HashMap<String, (FrameKey, TextureHandle)>,
+    /// The UI pass each thumbnail texture was last used in: thumbnails beyond
+    /// [`MAX_THUMB_TEXTURES`] are freed, least recently used first (#1682).
+    thumb_used: HashMap<String, u64>,
     control_rx: Option<Receiver<ControlRequest>>,
     /// One explicit panel reveal; consumed by the custom renderer, never repeated per frame.
     pub(crate) pending_panel_raise: Option<PanelKind>,
@@ -302,6 +308,12 @@ pub struct FilmcraftApp {
     deferred: Vec<(ControlRequest, f64)>,
     last_ui_time: f64,
     pub(crate) synthetic: Vec<egui::Event>,
+    /// macOS: a Control+Click already translated to a secondary (context) click, so its release is
+    /// translated too even if Control is let go mid-click. AppKit delivers Control+Click to the
+    /// view as a *primary* press with the Control modifier (`rightMouseDown:` only fires for a
+    /// right button or two-finger click), so the app does the platform's translation itself.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    mac_ctrl_click_armed: bool,
     /// The mouse press in progress (its start time) and the undo history when it began, for Escape
     /// to take back what the press changed (#580).
     value_press: Option<(f64, filmcraft_engine::UndoMark)>,
@@ -547,6 +559,7 @@ impl FilmcraftApp {
             native_dialog: None,
             auto: Default::default(),
             textures: HashMap::new(),
+            thumb_used: HashMap::new(),
             control_rx: None,
             pending_panel_raise: None,
             control_input_only: false,
@@ -555,6 +568,7 @@ impl FilmcraftApp {
             deferred: Vec::new(),
             last_ui_time: 0.0,
             synthetic: Vec::new(),
+            mac_ctrl_click_armed: false,
             value_press: None,
             loudness: None,
             status_seen: (String::new(), 0.0),
@@ -626,6 +640,7 @@ impl FilmcraftApp {
                 FrameServer::default_workers(),
             ));
             self.textures.clear();
+            self.thumb_used.clear();
             self.tl.reset_media_caches();
             // the new frame server needs the Memory settings
             self.applied_prefs = None;
@@ -678,6 +693,16 @@ impl FilmcraftApp {
         }
     }
 
+    /// View ▸ Reset Interface Zoom: the scale Settings ▸ Appearance ▸ UI Scale asks for (the
+    /// system's with Auto), undoing any session zoom (#2253).
+    /// Returns the zoom factor set (egui reports it from the next pass on).
+    pub(crate) fn reset_ui_zoom(&mut self, ctx: &egui::Context) -> f32 {
+        let native = ctx.native_pixels_per_point().filter(|v| v.is_finite() && *v > 0.0).unwrap_or(1.0);
+        let zoom = self.session.prefs.appearance.ui_scale_factor().map_or(1.0, |scale| scale / native);
+        ctx.set_zoom_factor(zoom);
+        zoom
+    }
+
     /// Make the UI follow the settings after they change (theme, tooltips, frame cache budget,
     /// play after rendering, audio device).
     pub fn apply_prefs(&mut self, ctx: &egui::Context) {
@@ -689,6 +714,11 @@ impl FilmcraftApp {
             if k != self.tokens.kind {
                 self.set_theme(ctx, k);
             }
+        }
+        // checked every frame: a theme or font change installs the style again
+        let animation = if self.session.prefs.appearance.animations { theme::ANIMATION_TIME } else { 0.0 };
+        if ctx.global_style().animation_time != animation {
+            ctx.global_style_mut(|s| s.animation_time = animation);
         }
         if self.applied_prefs.as_ref() == Some(&self.session.prefs) {
             return;
@@ -713,6 +743,9 @@ impl FilmcraftApp {
             } else if language == i18n::Language::ZhCn && !i18n::chinese_font_available() {
                 self.ui.language = i18n::Language::En;
                 self.ui.status = tl!("no Chinese font is installed on this system; the interface stays in English").into();
+            } else if language == i18n::Language::Ko && !i18n::korean_font_available() {
+                self.ui.language = i18n::Language::En;
+                self.ui.status = tl!("no Korean font is installed on this system; the interface stays in English").into();
             } else {
                 self.ui.language = language;
             }
@@ -839,6 +872,13 @@ impl FilmcraftApp {
     }
 
     pub fn show_panel(&mut self, p: PanelKind) {
+        // closed while floating: it floats again where it was (#1985); taken before the Timeline's
+        // own restore below docks it
+        let open = self.ui.dock.contains(p) || self.ui.floating.iter().any(|group| group.panels.contains(&p));
+        let refloat = match self.ui.closed_floating.iter().position(|(k, _)| *k == p) {
+            Some(i) if !open => Some(self.ui.closed_floating.remove(i).1),
+            _ => None,
+        };
         if p == PanelKind::Timeline && !self.ui.floating.iter().any(|group| group.panels.contains(&p)) {
             self.ui.dock.restore_timeline();
         }
@@ -862,6 +902,15 @@ impl FilmcraftApp {
                 _ => PanelKind::Project,
             };
             self.ui.dock.open_near(p, near);
+        }
+        if let Some(rect) = refloat.filter(|r| r.iter().all(|v| v.is_finite())) {
+            let rect = [rect[0], rect[1], rect[2].max(160.0), rect[3].max(120.0)];
+            if let Err(e) = self.apply_dock(craft_ui::docking::Action::Float { panel: p, rect }) {
+                // refused (it is the only docked panel left): it stays docked, and its floating
+                // place is kept rather than lost
+                log::warn!("could not float {} again: {e}", p.id());
+                self.ui.closed_floating.push((p, rect));
+            }
         }
         let _ = self.apply_dock(craft_ui::docking::Action::Activate { panel: p });
         self.ui.focused = p;
@@ -1241,12 +1290,40 @@ impl FilmcraftApp {
         let name = format!("thumb-{}-{}-{}", item.0, frame, width);
         if let Some(img) = self.frames.get(&key) {
             let id = self.texture_for(ctx, &name, key, &img);
+            self.thumb_touched(ctx, &name);
             return Some((id, egui::vec2(img.w as f32, img.h as f32)));
         }
         let scale = width as f32 / src_w.max(1) as f32;
         let project = self.session.project.clone();
         self.frames.request(key, rate.tick_of(frame), scale, &project, 50);
-        self.texture_existing(&name)
+        let shown = self.texture_existing(&name);
+        if shown.is_some() {
+            self.thumb_touched(ctx, &name);
+        }
+        shown
+    }
+
+    /// Note that thumbnail texture `name` is used in this pass, and free the least recently used
+    /// thumbnails once there are more than [`MAX_THUMB_TEXTURES`]: every frame shown in a timeline
+    /// tile or a hover scrub got a texture of its own that was never freed (#1682).
+    fn thumb_touched(&mut self, ctx: &egui::Context, name: &str) {
+        let pass = ctx.cumulative_pass_nr();
+        if self.thumb_used.insert(name.to_string(), pass).is_some() || self.thumb_used.len() <= MAX_THUMB_TEXTURES {
+            return;
+        }
+        // down to three quarters, never a thumbnail already drawn in this pass
+        let mut old: Vec<(u64, String)> = self.thumb_used.iter().filter(|(_, p)| **p < pass).map(|(n, p)| (*p, n.clone())).collect();
+        old.sort_unstable();
+        let excess = self.thumb_used.len().saturating_sub(MAX_THUMB_TEXTURES * 3 / 4);
+        for (_, n) in old.into_iter().take(excess) {
+            self.thumb_used.remove(&n);
+            self.textures.remove(&n);
+        }
+    }
+
+    /// The number of thumbnail textures held (tests, diagnostics).
+    pub fn thumbnail_textures(&self) -> usize {
+        self.textures.keys().filter(|n| n.starts_with("thumb-")).count()
     }
 
     // ---------------------------------------------------------------- files
@@ -1433,6 +1510,15 @@ impl FilmcraftApp {
         self.menu_sent = items;
     }
 
+    /// Whether keyboard focus is on a dock divider or a floating panel's resize grip, as drawn last pass.
+    fn divider_focused(&self, ctx: &egui::Context) -> bool {
+        let Some(focused) = ctx.memory(|m| m.focused()) else { return false };
+        self.auto
+            .previous
+            .iter()
+            .any(|e| e.response_id == Some(focused) && (e.id.starts_with("dock.gutter.") || (e.id.starts_with("panel.float.") && e.id.ends_with(".resize"))))
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let workspaces = (dock::names(&self.workspaces), self.ui.workspace.clone());
         if self.bindings_rev != self.session.shortcuts.revision || workspaces != self.menu_workspaces {
@@ -1440,7 +1526,10 @@ impl FilmcraftApp {
             self.bindings = menus::bindings(self);
             self.bindings_rev = self.session.shortcuts.revision;
         }
-        if ctx.egui_wants_keyboard_input() || self.dialog == Some(Dialog::Shortcuts) {
+        // A pane divider or floating-panel grip keeps focus after a pointer drag so arrows can
+        // nudge it, but it takes no other key: Space and the other shortcuts keep working (#1482).
+        let divider_focused = self.divider_focused(ctx);
+        if (ctx.egui_wants_keyboard_input() && !divider_focused) || self.dialog == Some(Dialog::Shortcuts) {
             return;
         }
         // A focused text field takes every unmodified key, including the ones our shortest
@@ -1453,6 +1542,7 @@ impl FilmcraftApp {
         if self.session.trim_play.dynamic.is_some() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             let _ = self.session.execute("trim.cancelDynamic", json!({}));
         }
+        panels::masks::pen_take_back(self, ctx, text_focused);
         // Panel shortcuts of the focused panel override application shortcuts on the same chord.
         // egui ignores extra Shift and Alt when matching, so the most specific chords go first
         // across both scopes (the sort is stable, so the panel still wins a tie): otherwise the
@@ -1496,6 +1586,10 @@ impl FilmcraftApp {
                 // Vietnamese Telex combines into diacritics (#243). Chords with a modifier stay:
                 // Ctrl+S and friends are not something a text field or an IME consumes.
                 if lets_text_field_keep(*m, text_focused) {
+                    continue;
+                }
+                // The focused divider consumes the arrows itself (egui matches them with any Shift/Alt).
+                if divider_focused && matches!(k, egui::Key::ArrowLeft | egui::Key::ArrowRight | egui::Key::ArrowUp | egui::Key::ArrowDown) {
                     continue;
                 }
                 if i.consume_key(*m, *k) {
@@ -1674,7 +1768,7 @@ impl FilmcraftApp {
         let focused = ctx.input(|i| i.focused);
         let was_focused: bool = ctx.data(|d| d.get_temp(focus_key)).unwrap_or(focused);
         ctx.data_mut(|d| d.insert_temp(focus_key, focused));
-        if !on || filmcraft_engine::media_watch::media_files(&self.session.project).is_empty() {
+        if !on || filmcraft_engine::media_watch::media_files(&self.session.project, &self.session.media).is_empty() {
             return;
         }
         let last: f64 = ctx.data(|d| d.get_temp(last_key)).unwrap_or(f64::NEG_INFINITY);
@@ -1693,6 +1787,7 @@ impl FilmcraftApp {
         }
         let ctx = ui.ctx().clone();
         self.auto.begin_frame();
+        panels::metadata::follow_selection(self);
         self.frames.set_context(&ctx);
         self.session.poll_persistence();
         panels::trim_monitor::advance(self, &ctx);
@@ -1937,9 +2032,44 @@ impl FilmcraftApp {
     }
 }
 
+/// On macOS a Control+Click means "right click": AppKit delivers it to the view as a *primary*
+/// press carrying the Control modifier (`rightMouseDown:` only fires for a real right button or
+/// two-finger click), so the app translates it to a secondary click before egui computes pointer
+/// state. `armed` pairs the press with its release, so the release is still a context click when
+/// Control is let go mid-click. Called from [`eframe::App::raw_input_hook`], which runs before
+/// egui's pass; only wired in on macOS, where Ctrl+Click is not a selection modifier.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn synthesize_mac_ctrl_click(armed: &mut bool, raw_input: &mut egui::RawInput) {
+    for event in &mut raw_input.events {
+        match event {
+            egui::Event::PointerButton { button, pressed, modifiers, .. } if *button == egui::PointerButton::Primary => {
+                if *pressed {
+                    if modifiers.ctrl {
+                        *button = egui::PointerButton::Secondary;
+                        *armed = true;
+                    } else {
+                        // A plain primary press ends any pairing left open (eg. the pointer left
+                        // the window mid-click, which egui also forgets).
+                        *armed = false;
+                    }
+                } else if *armed {
+                    *button = egui::PointerButton::Secondary;
+                    *armed = false;
+                }
+            }
+            egui::Event::PointerGone => *armed = false,
+            _ => {}
+        }
+    }
+}
+
 impl eframe::App for FilmcraftApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.native_window_focused = Some(raw_input.focused);
+        #[cfg(target_os = "macos")]
+        if !self.control_input_only {
+            synthesize_mac_ctrl_click(&mut self.mac_ctrl_click_armed, raw_input);
+        }
         if self.control_input_only {
             // Preserve screenshot responses and all viewport lifecycle/geometry metadata.
             raw_input.events.retain(|event| matches!(event, egui::Event::Screenshot { .. }));
@@ -1982,9 +2112,12 @@ impl eframe::App for FilmcraftApp {
             theme::install(ctx, &self.tokens);
             // theme::install replaces the fonts: add the system Japanese font back (or fall back to
             // English when a saved Japanese setting meets a system without one)
-            // (likewise Chinese without a Chinese face)
+            // (likewise Chinese without a Chinese face, Korean without a Hangul one)
             let japanese_missing = self.ui.language == i18n::Language::Ja && !i18n::install_japanese_font(ctx);
-            if japanese_missing || (self.ui.language == i18n::Language::ZhCn && !i18n::chinese_font_available()) {
+            if japanese_missing
+                || (self.ui.language == i18n::Language::ZhCn && !i18n::chinese_font_available())
+                || (self.ui.language == i18n::Language::Ko && !i18n::korean_font_available())
+            {
                 self.ui.language = i18n::Language::En;
             }
             self.styled = true;
@@ -2207,6 +2340,96 @@ mod clipboard_key_tests {
         assert_eq!(events.len(), 3);
         assert!(matches!(events[0], Event::Text(_)));
         assert!(matches!(events[1], Event::Copy));
+    }
+}
+
+#[cfg(test)]
+mod mac_ctrl_click_tests {
+    use egui::{Event, Modifiers, PointerButton, RawInput};
+
+    fn click(button: PointerButton, pressed: bool, ctrl: bool) -> Event {
+        Event::PointerButton { pos: egui::pos2(40.0, 12.0), button, pressed, modifiers: if ctrl { Modifiers::CTRL } else { Modifiers::NONE } }
+    }
+
+    fn buttons(raw: &mut RawInput) -> Vec<(PointerButton, bool)> {
+        raw.events
+            .iter()
+            .filter_map(|e| match e {
+                Event::PointerButton { button, pressed, .. } => Some((*button, *pressed)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// AppKit delivers Control+Click as a primary press with the Control modifier; it must reach
+    /// egui as a secondary click so `secondary_clicked()` (the context menus) fires on macOS.
+    #[test]
+    fn ctrl_click_is_a_secondary_click() {
+        let mut raw = RawInput { events: vec![click(PointerButton::Primary, true, true), click(PointerButton::Primary, false, true)], ..Default::default() };
+        let mut armed = false;
+        super::synthesize_mac_ctrl_click(&mut armed, &mut raw);
+        assert!(!armed);
+        assert_eq!(buttons(&mut raw), vec![(PointerButton::Secondary, true), (PointerButton::Secondary, false)]);
+    }
+
+    /// End to end: the rewritten events are what egui's pointer state sees, so the context
+    /// menus (`secondary_clicked()`) fire on a Control+Click exactly like on a real right click.
+    #[test]
+    fn synthesized_click_fires_secondary_clicked() {
+        let ctx = egui::Context::default();
+        let mut raw = RawInput { events: vec![click(PointerButton::Primary, true, true), click(PointerButton::Primary, false, true)], ..Default::default() };
+        let mut armed = false;
+        super::synthesize_mac_ctrl_click(&mut armed, &mut raw);
+        let mut secondary = false;
+        // No renderer here: drop the pass output, clearing its texture deltas so epaint's drop
+        // guard does not panic on the font texture.
+        let mut out = ctx.run_ui(raw, |ctx| secondary = ctx.input(|i| i.pointer.secondary_clicked()));
+        out.textures_delta.clear();
+        assert!(secondary);
+    }
+
+    /// Releasing Control before the mouse button still closes the click as a context click; the
+    /// mouse release alone must not become a stray primary click.
+    #[test]
+    fn release_is_paired_to_the_ctrl_press() {
+        let mut raw = RawInput {
+            events: vec![
+                click(PointerButton::Primary, true, true),
+                click(PointerButton::Primary, false, false), // Control already released
+            ],
+            ..Default::default()
+        };
+        let mut armed = false;
+        super::synthesize_mac_ctrl_click(&mut armed, &mut raw);
+        assert!(!armed);
+        assert_eq!(buttons(&mut raw), vec![(PointerButton::Secondary, true), (PointerButton::Secondary, false)]);
+    }
+
+    /// A plain click keeps its meaning (on macOS Cmd is the selection modifier, not Control).
+    #[test]
+    fn plain_click_is_untouched() {
+        let mut raw = RawInput { events: vec![click(PointerButton::Primary, true, false), click(PointerButton::Primary, false, false)], ..Default::default() };
+        super::synthesize_mac_ctrl_click(&mut false, &mut raw);
+        assert_eq!(buttons(&mut raw), vec![(PointerButton::Primary, true), (PointerButton::Primary, false)]);
+    }
+
+    /// A half-open pairing (pointer left the window mid-click) must not turn the next plain click
+    /// into a context click.
+    #[test]
+    fn new_plain_press_clears_a_stale_pairing() {
+        let mut raw = RawInput {
+            events: vec![
+                click(PointerButton::Primary, true, true),
+                Event::PointerGone,
+                click(PointerButton::Primary, true, false),
+                click(PointerButton::Primary, false, false),
+            ],
+            ..Default::default()
+        };
+        let mut armed = false;
+        super::synthesize_mac_ctrl_click(&mut armed, &mut raw);
+        assert!(!armed);
+        assert_eq!(buttons(&mut raw), vec![(PointerButton::Secondary, true), (PointerButton::Primary, true), (PointerButton::Primary, false),]);
     }
 }
 
