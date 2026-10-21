@@ -148,6 +148,7 @@ impl Session {
                     set(component, windows::core::w!("HevcRateControlMethod").as_ptr(), AmfVariant::int64(rate_control));
                     set(component, windows::core::w!("HevcGOPSize").as_ptr(), AmfVariant::int64(i64::from(cfg.keyint.max(1))));
                     if ten_bit {
+                        set(component, windows::core::w!("HevcColorBitDepth").as_ptr(), AmfVariant::int64(10));
                         set(component, windows::core::w!("HevcNominalRange").as_ptr(), AmfVariant::int64(1));
                     }
                 }
@@ -229,14 +230,25 @@ impl Session {
             ((*(*surface).vtbl).set_pts)(surface, pts);
             ((*(*surface).vtbl).set_duration)(surface, duration);
 
-            let res = ((*(*self.component).vtbl).submit_input)(self.component, surface as *mut c_void);
+            let mut res = ((*(*self.component).vtbl).submit_input)(self.component, surface as *mut c_void);
+            let mut backlog = Vec::new();
+            if res == AMF_INPUT_FULL {
+                let start = Instant::now();
+                while res == AMF_INPUT_FULL && start.elapsed() < Duration::from_millis(500) {
+                    let mut more = self.query_packets()?;
+                    backlog.append(&mut more);
+                    std::thread::sleep(Duration::from_millis(1));
+                    res = ((*(*self.component).vtbl).submit_input)(self.component, surface as *mut c_void);
+                }
+            }
             ((*(*surface).vtbl).release)(surface);
             if res != AMF_OK {
                 return Err(format!("AMF SubmitInput failed ({res})"));
             }
+            let mut packets = backlog;
+            packets.extend(self.query_packets()?);
+            Ok(packets)
         }
-
-        self.query_packets()
     }
 
     pub fn encode_10bit(&mut self, y: &[u16], u: &[u16], v: &[u16], pts: i64, duration: i64) -> Result<Vec<Packet>, String> {
@@ -279,14 +291,25 @@ impl Session {
             ((*(*surface).vtbl).set_pts)(surface, pts);
             ((*(*surface).vtbl).set_duration)(surface, duration);
 
-            let res = ((*(*self.component).vtbl).submit_input)(self.component, surface as *mut c_void);
+            let mut res = ((*(*self.component).vtbl).submit_input)(self.component, surface as *mut c_void);
+            let mut backlog = Vec::new();
+            if res == AMF_INPUT_FULL {
+                let start = Instant::now();
+                while res == AMF_INPUT_FULL && start.elapsed() < Duration::from_millis(500) {
+                    let mut more = self.query_packets()?;
+                    backlog.append(&mut more);
+                    std::thread::sleep(Duration::from_millis(1));
+                    res = ((*(*self.component).vtbl).submit_input)(self.component, surface as *mut c_void);
+                }
+            }
             ((*(*surface).vtbl).release)(surface);
             if res != AMF_OK {
                 return Err(format!("AMF SubmitInput P010 failed ({res})"));
             }
+            let mut packets = backlog;
+            packets.extend(self.query_packets()?);
+            Ok(packets)
         }
-
-        self.query_packets()
     }
 
     fn query_packets(&mut self) -> Result<Vec<Packet>, String> {
@@ -302,7 +325,12 @@ impl Session {
                     let ptr = ((*(*buf).vtbl).get_native)(buf);
                     let pts = ((*(*buf).vtbl).get_pts)(buf);
                     let slice = std::slice::from_raw_parts(ptr, size);
-                    let is_key = is_keyframe(self.codec, slice);
+                    let mut var = AmfVariant { var_type: 0, _pad: 0, val: [0; 16] };
+                    let is_key = if ((*(*buf).vtbl).get_property)(buf, windows::core::w!("OutputDataType").as_ptr(), &mut var) == AMF_OK {
+                        var.as_int64() == Some(0)
+                    } else {
+                        is_keyframe(self.codec, slice)
+                    };
                     packets.push(Packet { data: slice.to_vec(), key: is_key, pts, dts: pts });
                     ((*(*buf).vtbl).release)(buf);
                     out_data = std::ptr::null_mut();
@@ -333,7 +361,12 @@ impl Session {
                     let ptr = ((*(*buf).vtbl).get_native)(buf);
                     let pts = ((*(*buf).vtbl).get_pts)(buf);
                     let slice = std::slice::from_raw_parts(ptr, size);
-                    let is_key = is_keyframe(self.codec, slice);
+                    let mut var = AmfVariant { var_type: 0, _pad: 0, val: [0; 16] };
+                    let is_key = if ((*(*buf).vtbl).get_property)(buf, windows::core::w!("OutputDataType").as_ptr(), &mut var) == AMF_OK {
+                        var.as_int64() == Some(0)
+                    } else {
+                        is_keyframe(self.codec, slice)
+                    };
                     packets.push(Packet { data: slice.to_vec(), key: is_key, pts, dts: pts });
                     ((*(*buf).vtbl).release)(buf);
                     out_data = std::ptr::null_mut();
@@ -382,13 +415,65 @@ fn is_keyframe(codec: Codec, data: &[u8]) -> bool {
             Codec::Hevc => {
                 if n.len() >= 2 {
                     let nal_type = (n[0] >> 1) & 0x3f;
-                    if matches!(nal_type, 19 | 20) {
+                    if matches!(nal_type, 19..=21) {
                         return true;
                     }
                 }
             }
             Codec::Av1 => {
-                return true;
+                // Parse OBUs: check for sequence header (1) or key frame in frame header (3, 6)
+                let mut pos = 0usize;
+                while pos < data.len() {
+                    let b0 = data[pos];
+                    if (b0 >> 7) & 1 != 0 {
+                        break;
+                    }
+                    let obu_type = (b0 >> 3) & 0x0F;
+                    let extension_flag = (b0 >> 2) & 1;
+                    let has_size = (b0 >> 1) & 1;
+                    pos += 1;
+                    if extension_flag != 0 {
+                        if pos >= data.len() { break; }
+                        pos += 1;
+                    }
+                    let payload_start = if has_size != 0 {
+                        let mut payload_len = 0usize;
+                        let mut shift = 0;
+                        let mut valid = false;
+                        while pos < data.len() {
+                            let b = data[pos];
+                            pos += 1;
+                            payload_len |= ((b & 0x7F) as usize) << shift;
+                            shift += 7;
+                            if (b & 0x80) == 0 {
+                                valid = true;
+                                break;
+                            }
+                        }
+                        if !valid { break; }
+                        let start = pos;
+                        pos = pos.saturating_add(payload_len);
+                        start
+                    } else {
+                        let start = pos;
+                        pos = data.len();
+                        start
+                    };
+
+                    if obu_type == 1 {
+                        return true;
+                    }
+                    if (obu_type == 3 || obu_type == 6)
+                        && let Some(&p0) = data.get(payload_start)
+                    {
+                        let show_existing_frame = (p0 >> 7) & 1;
+                        let frame_type = (p0 >> 5) & 3;
+                        if show_existing_frame == 0 && frame_type == 0 {
+                            return true;
+                        }
+                    }
+                }
+                return false;
             }
         }
     }

@@ -21,6 +21,7 @@ pub const AMF_OK: i32 = 0;
 pub const AMF_FAIL: i32 = 1;
 pub const AMF_EOF: i32 = 23;
 pub const AMF_REPEAT: i32 = 24;
+pub const AMF_INPUT_FULL: i32 = 25;
 pub const AMF_NOT_SUPPORTED: i32 = 10;
 
 pub const AMF_MEMORY_HOST: u32 = 1;
@@ -88,6 +89,15 @@ impl AmfVariant {
         s.val[..4].copy_from_slice(&width.to_ne_bytes());
         s.val[4..8].copy_from_slice(&height.to_ne_bytes());
         s
+    }
+
+    pub fn as_int64(&self) -> Option<i64> {
+        if self.var_type == AMF_VARIANT_INT64 {
+            let bytes = <[u8; 8]>::try_from(&self.val[..8]).ok()?;
+            Some(i64::from_ne_bytes(bytes))
+        } else {
+            None
+        }
     }
 }
 
@@ -274,7 +284,7 @@ pub struct AmfBufferVtbl {
     pub query_interface: *const c_void,
 
     pub set_property: *const c_void,
-    pub get_property: *const c_void,
+    pub get_property: unsafe extern "system" fn(*mut AmfBuffer, *const u16, *mut AmfVariant) -> i32,
     pub has_property: *const c_void,
     pub get_property_count: *const c_void,
     pub get_property_at: *const c_void,
