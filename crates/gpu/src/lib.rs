@@ -38,6 +38,7 @@ use filmcraft_frame::{Chroma, PixelData, VideoFrame};
 use filmcraft_render::Blend;
 use filmcraft_render::plan::{FramePlan, PlanLayer, PlanStep};
 
+pub mod adapter;
 pub mod export_renderer;
 pub mod fx;
 pub mod lut;
@@ -387,7 +388,23 @@ impl GpuCompositor {
             view_formats: &[],
         });
         let dummy = dummy_tex.create_view(&Default::default());
-        let fx = fx::FxStage::supported(device).then(|| fx::FxStage::new(device, &shader, &layer_bgl));
+        // The effect stage's pipelines can still be invalid on a device that passes the limits
+        // check (Rgba32Float is not renderable everywhere, e.g. software Vulkan/GL). Validation
+        // errors would panic, so they are captured: without the stage, effects render on the CPU.
+        let fx = fx::FxStage::supported(device)
+            .then(|| {
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let stage = fx::FxStage::new(device, &shader, &layer_bgl);
+                match poll_now(scope.pop()) {
+                    Some(None) => Some(stage),
+                    Some(Some(e)) => {
+                        log::warn!("GPU effects unavailable on this device, rendering them on the CPU: {e}");
+                        None
+                    }
+                    None => None,
+                }
+            })
+            .flatten();
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -1011,7 +1028,7 @@ impl GpuCompositor {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        wait_mapped(&self.device)?;
         rx.recv().ok()?.ok()?;
         let data = slice.get_mapped_range().ok()?;
         let mut out = Vec::with_capacity((w * h * 4) as usize);
@@ -1074,7 +1091,7 @@ impl GpuCompositor {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        wait_mapped(&self.device)?;
         rx.recv().ok()?.ok()?;
         export_renderer::timing::add_map_wait(t.elapsed());
         let t = std::time::Instant::now();
@@ -1117,7 +1134,7 @@ impl GpuCompositor {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        wait_mapped(&self.device)?;
         rx.recv().ok()?.ok()?;
         let data = slice.get_mapped_range().ok()?;
         let mut out = Vec::with_capacity((w * h * 4) as usize);
@@ -1128,6 +1145,15 @@ impl GpuCompositor {
         buf.unmap();
         Some((*w, *h, out))
     }
+}
+
+/// Wait for the last submission and its `map_async` callbacks.
+///
+/// Export readback used `PollType::wait_indefinitely`. On radv that can never return after a
+/// failed hardware-encode attempt (#1058), so the export never finishes. Eight seconds is longer
+/// than a healthy map; a timeout returns `None` and the CPU renderer takes the frame.
+fn wait_mapped(device: &wgpu::Device) -> Option<()> {
+    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(8)) }).ok().map(|_| ())
 }
 
 /// Shader source: kind (0 RGBA8 sRGB, 1 linear premultiplied RGBA, 2 YUV), sampling scales, dimensions, color.
@@ -1148,6 +1174,16 @@ struct SrcInfo {
 
 /// Floats in a layer's uniform block (`U` in `composite.wgsl`: 13 vec4).
 const UNIFORM_FLOATS: usize = 52;
+
+/// Poll a future once: wgpu's native error scopes resolve immediately. `None` if it is still
+/// pending (then the caller assumes the worst).
+fn poll_now<F: std::future::Future>(f: F) -> Option<F::Output> {
+    let mut f = std::pin::pin!(f);
+    match f.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())) {
+        std::task::Poll::Ready(v) => Some(v),
+        std::task::Poll::Pending => None,
+    }
+}
 
 /// A render pass drawing into the accumulator.
 fn accum_pass<'e>(enc: &'e mut wgpu::CommandEncoder, view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>) -> wgpu::RenderPass<'e> {
