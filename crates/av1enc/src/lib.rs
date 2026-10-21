@@ -200,7 +200,7 @@ impl Encoder {
     }
 
     pub fn seq_level_idx(&self) -> u8 {
-        if self.config.width > 1920 || self.config.height > 1080 { 12 } else { 8 }
+        obu::select_seq_level_idx(self.config.width, self.config.height)
     }
 
     pub fn sequence_header_obu(&self) -> Vec<u8> {

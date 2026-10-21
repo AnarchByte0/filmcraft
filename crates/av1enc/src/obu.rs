@@ -2,6 +2,10 @@
 
 use filmcraft_bitstream::BitWriter;
 
+pub fn select_seq_level_idx(width: u32, height: u32) -> u8 {
+    if width > 1920 || height > 1080 { 12 } else { 8 }
+}
+
 pub const OBU_SEQUENCE_HEADER: u8 = 1;
 pub const OBU_TEMPORAL_DELIMITER: u8 = 2;
 pub const OBU_FRAME_HEADER: u8 = 3;
@@ -69,8 +73,8 @@ pub fn write_sequence_header(cfg: &SequenceConfig) -> Vec<u8> {
     // operating_point_idc[0] = 0
     w.write_bits(0, 12);
     // seq_level_idx[0] = 8 (Level 4.0 - up to 1080p, or 12 for 4K)
-    let level = if cfg.width > 1920 || cfg.height > 1080 { 12 } else { 8 };
-    w.write_bits(level, 5);
+    let level = select_seq_level_idx(cfg.width, cfg.height);
+    w.write_bits(level as u32, 5);
     if level > 7 {
         w.write_bit(false); // seq_tier = 0
     }
