@@ -158,9 +158,6 @@ fn config(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -
     if !(format == Format::H264 || wide) || s.format.is_mxf() {
         return Err("only MP4 / MOV H.264, H.265 and AV1 exports".into());
     }
-    if av1 && s.multiplexer == filmcraft_export::Multiplexer::Mov {
-        return Err("AV1 exports are supported in MP4 container only".into());
-    }
     let hdr = s.signal.is_hdr();
     if hdr && !wide {
         return Err("HDR (8-bit H.264 here carries it with software signalling)".into());
