@@ -30,11 +30,14 @@ pub fn total_physical_memory() -> Option<u64> {
 
 /// Compute a recommended GOP frame cache budget (in bytes) scaled to total physical RAM.
 ///
-/// Default base budget is 1 GiB (ilmcraft_codecs::FRAME_BUDGET).
+/// Default base budget is 1 GiB (`filmcraft_codecs::FRAME_BUDGET`).
 /// On systems with >= 32 GiB RAM (threshold at 30.0 GiB to accommodate hardware/OS-reserved RAM), scaled to 2.5 GiB.
 /// On systems with >= 16 GiB RAM (threshold at 14.0 GiB), scaled to 1.5 GiB.
 /// On 32-bit/WASM targets, systems with < 16 GiB, or unsupported OSes (e.g. macOS where physical RAM detection returns None), kept at 1.0 GiB.
 pub fn default_frame_budget_for_ram(total_bytes: u64) -> usize {
+    if usize::BITS <= 32 {
+        return filmcraft_codecs::FRAME_BUDGET;
+    }
     let gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let budget_bytes: u64 = if gib >= 30.0 {
         // 2.5 GiB on 32+ GiB systems
@@ -55,6 +58,10 @@ mod tests {
 
     #[test]
     fn ram_scaled_budget_calculations() {
+        if usize::BITS <= 32 {
+            assert_eq!(default_frame_budget_for_ram(32 * 1024 * 1024 * 1024), filmcraft_codecs::FRAME_BUDGET);
+            return;
+        }
         // < 14 GiB -> 1 GiB
         assert_eq!(default_frame_budget_for_ram(8 * 1024 * 1024 * 1024), 1 << 30);
         // 16 GiB -> 1.5 GiB
