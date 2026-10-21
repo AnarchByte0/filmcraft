@@ -116,7 +116,12 @@ impl Session {
         let (w, h) = (cfg.width as i32, cfg.height as i32);
         let target_bps = i64::from(cfg.bitrate_kbps.max(100)).saturating_mul(1000);
         let peak_bps = i64::from(cfg.max_bitrate_kbps.max(cfg.bitrate_kbps)).saturating_mul(1000);
-        let rate_control = if cfg.cbr { 1 } else { 2 };
+        let rate_control = match (codec, cfg.cbr) {
+            (Codec::H264, true) => 1,
+            (Codec::H264, false) => 2,
+            (Codec::Hevc | Codec::Av1, true) => 3,
+            (Codec::Hevc | Codec::Av1, false) => 2,
+        };
 
         // SAFETY: setting properties on live AMFComponent before Init.
         unsafe {
@@ -312,6 +317,22 @@ impl Session {
         }
     }
 
+    fn check_output_buffer_keyframe(&self, buf: *mut AmfBuffer, slice: &[u8]) -> bool {
+        let (prop_name, target_enum) = match self.codec {
+            Codec::H264 => (windows::core::w!("OutputDataType"), AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_IDR),
+            Codec::Hevc => (windows::core::w!("HevcOutputDataType"), AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_IDR),
+            Codec::Av1 => (windows::core::w!("Av1OutputFrameType"), AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_KEY),
+        };
+        let mut var = AmfVariant { var_type: 0, _pad: 0, val: [0; 16] };
+        // SAFETY: calling get_property on valid AmfBuffer pointer.
+        let hr = unsafe { ((*(*buf).vtbl).get_property)(buf, prop_name.as_ptr(), &mut var) };
+        if hr == AMF_OK && let Some(val) = var.as_int64() {
+            val == target_enum
+        } else {
+            is_keyframe(self.codec, slice)
+        }
+    }
+
     fn query_packets(&mut self) -> Result<Vec<Packet>, String> {
         let mut packets = Vec::new();
         let mut out_data: *mut c_void = std::ptr::null_mut();
@@ -325,12 +346,7 @@ impl Session {
                     let ptr = ((*(*buf).vtbl).get_native)(buf);
                     let pts = ((*(*buf).vtbl).get_pts)(buf);
                     let slice = std::slice::from_raw_parts(ptr, size);
-                    let mut var = AmfVariant { var_type: 0, _pad: 0, val: [0; 16] };
-                    let is_key = if ((*(*buf).vtbl).get_property)(buf, windows::core::w!("OutputDataType").as_ptr(), &mut var) == AMF_OK {
-                        var.as_int64() == Some(0)
-                    } else {
-                        is_keyframe(self.codec, slice)
-                    };
+                    let is_key = self.check_output_buffer_keyframe(buf, slice);
                     packets.push(Packet { data: slice.to_vec(), key: is_key, pts, dts: pts });
                     ((*(*buf).vtbl).release)(buf);
                     out_data = std::ptr::null_mut();
@@ -361,12 +377,7 @@ impl Session {
                     let ptr = ((*(*buf).vtbl).get_native)(buf);
                     let pts = ((*(*buf).vtbl).get_pts)(buf);
                     let slice = std::slice::from_raw_parts(ptr, size);
-                    let mut var = AmfVariant { var_type: 0, _pad: 0, val: [0; 16] };
-                    let is_key = if ((*(*buf).vtbl).get_property)(buf, windows::core::w!("OutputDataType").as_ptr(), &mut var) == AMF_OK {
-                        var.as_int64() == Some(0)
-                    } else {
-                        is_keyframe(self.codec, slice)
-                    };
+                    let is_key = self.check_output_buffer_keyframe(buf, slice);
                     packets.push(Packet { data: slice.to_vec(), key: is_key, pts, dts: pts });
                     ((*(*buf).vtbl).release)(buf);
                     out_data = std::ptr::null_mut();
