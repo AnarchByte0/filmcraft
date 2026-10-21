@@ -57,6 +57,9 @@ impl Drop for Plane {
 
 impl Plane {
     /// Fully initialize a recycled allocation by copying; no preceding zero fill is needed.
+    ///
+    /// Note: Plane deliberately does not implement Clone so that allocations remain
+    /// fallible (Result) rather than panicking on OOM. Use     ry_clone instead.
     pub fn try_clone(&self) -> crate::Result<Plane> {
         let mut data = recycled(self.data.len()).unwrap_or_default();
         data.clear();
@@ -166,6 +169,8 @@ pub struct FrameBuf {
 }
 
 impl FrameBuf {
+    /// Note: FrameBuf deliberately does not implement Clone so that allocations remain
+    /// fallible (Result) rather than panicking on OOM. Use     ry_clone instead.
     pub fn try_clone(&self) -> crate::Result<FrameBuf> {
         Ok(FrameBuf {
             planes: [self.planes[0].try_clone()?, self.planes[1].try_clone()?, self.planes[2].try_clone()?],
