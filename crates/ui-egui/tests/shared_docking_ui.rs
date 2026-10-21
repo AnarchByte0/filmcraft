@@ -275,6 +275,52 @@ fn real_panel_drag_merges_splits_floats_and_redocks_without_editing_documents() 
     assert!(h.state().ui_error.is_none());
 }
 
+#[test]
+fn dropping_on_the_window_edge_docks_beside_the_whole_workspace() {
+    let mut app = FilmcraftApp::new(Session::default());
+    app.ui.dock = layout().root;
+    let mut h = Harness::builder().with_size(vec2(1200.0, 760.0)).build_eframe(move |_| app);
+    for _ in 0..4 {
+        step(&mut h);
+    }
+    let from = rect(&h, "panel.tab.Info").center();
+    let leftmost = rect(&h, "panel.Info");
+    // The outer edge of the leftmost group: without the window-edge zone this splits only that group.
+    drag(&mut h, from, pos2(leftmost.left() + 2.0, leftmost.center().y), Modifiers::NONE);
+    assert_eq!(
+        h.state().ui.dock,
+        DockNode::Split {
+            vertical: false,
+            size: SplitSize::Ratio(0.25),
+            a: Box::new(DockNode::Tabs { panels: vec![PanelKind::Info], active: 0 }),
+            b: Box::new(DockNode::Split {
+                vertical: false,
+                size: SplitSize::FixedA(400.0),
+                a: Box::new(DockNode::Tabs { panels: vec![PanelKind::Project, PanelKind::History], active: 1 }),
+                b: Box::new(DockNode::Tabs { panels: vec![PanelKind::Source, PanelKind::Program], active: 1 }),
+            }),
+        }
+    );
+}
+
+#[test]
+fn dock_panel_without_anchor_docks_along_a_workspace_edge() {
+    let mut app = FilmcraftApp::new(Session::default());
+    app.ui.dock = layout().root;
+    let ctx = egui::Context::default();
+    menus::invoke(&mut app, &ctx, "window.dockPanel", json!({"panel": "Program", "zone": "bottom"})).unwrap();
+    let DockNode::Split { vertical: true, size: SplitSize::Ratio(ratio), a, b } = &app.ui.dock else { panic!("root not split: {:?}", app.ui.dock) };
+    assert_eq!(*ratio, 0.75);
+    assert_eq!(**b, DockNode::Tabs { panels: vec![PanelKind::Program], active: 0 });
+    assert!(!a.contains(PanelKind::Program) && a.contains(PanelKind::Source) && a.contains(PanelKind::Info));
+    let before = app.ui.dock.clone();
+    assert!(menus::invoke(&mut app, &ctx, "window.dockPanel", json!({"panel": "Info", "zone": "center"})).is_err());
+    assert_eq!(app.ui.dock, before);
+    app.ui.dock = DockNode::Tabs { panels: vec![PanelKind::Project], active: 0 };
+    assert!(menus::invoke(&mut app, &ctx, "window.dockPanel", json!({"panel": "Project", "zone": "left"})).is_err());
+    assert_eq!(app.ui.dock, DockNode::Tabs { panels: vec![PanelKind::Project], active: 0 });
+}
+
 fn same_group(root: &DockNode, first: PanelKind, second: PanelKind) -> bool {
     match root {
         DockNode::Tabs { panels, .. } => panels.contains(&first) && panels.contains(&second),
@@ -512,4 +558,55 @@ fn narration_selection_reveals_covered_floating_tts_once_without_editing_the_pro
     assert_eq!(ctx.layer_id_at(covered), Some(layer(PanelKind::Info)));
     assert_eq!(h.state().ui.tts, draft);
     assert!(std::sync::Arc::ptr_eq(&project, &h.state().session.project));
+}
+
+/// #1985: a panel closed while floating came back docked when opened again from the Window menu;
+/// it now floats again where it was. Closed while docked, it opens docked as before.
+#[test]
+fn a_panel_closed_while_floating_reopens_floating_where_it_was() {
+    let mut app = FilmcraftApp::new(Session::default());
+    let ctx = egui::Context::default();
+    menus::invoke(&mut app, &ctx, "window.floatPanel", json!({"panel": "Info", "rect": [45, 65, 420, 320]})).unwrap();
+    let rect = app.ui.floating.iter().find(|g| g.panels.contains(&PanelKind::Info)).unwrap().rect;
+    menus::invoke(&mut app, &ctx, "window.closePanel", json!({"panel": "Info"})).unwrap();
+    assert!(!app.ui.dock.contains(PanelKind::Info) && !app.ui.floating.iter().any(|g| g.panels.contains(&PanelKind::Info)));
+    menus::invoke(&mut app, &ctx, &menus::panel_command_id(PanelKind::Info), json!({})).unwrap();
+    let back = app.ui.floating.iter().find(|g| g.panels.contains(&PanelKind::Info)).expect("Info floats again");
+    assert_eq!(back.rect, rect, "where it was");
+    assert!(!app.ui.dock.contains(PanelKind::Info));
+    // docked, then closed: it opens docked
+    menus::invoke(&mut app, &ctx, "window.dockPanel", json!({"panel": "Info", "anchor": "Project"})).unwrap();
+    menus::invoke(&mut app, &ctx, "window.closePanel", json!({"panel": "Info"})).unwrap();
+    menus::invoke(&mut app, &ctx, &menus::panel_command_id(PanelKind::Info), json!({})).unwrap();
+    assert!(app.ui.dock.contains(PanelKind::Info));
+    assert!(!app.ui.floating.iter().any(|g| g.panels.contains(&PanelKind::Info)));
+    // the Timeline too, though reopening it first puts it back in its own place in the dock
+    menus::invoke(&mut app, &ctx, "window.floatPanel", json!({"panel": "Timeline", "rect": [60, 80, 700, 300]})).unwrap();
+    let rect = app.ui.floating.iter().find(|g| g.panels.contains(&PanelKind::Timeline)).unwrap().rect;
+    menus::invoke(&mut app, &ctx, "window.closePanel", json!({"panel": "Timeline"})).unwrap();
+    menus::invoke(&mut app, &ctx, &menus::panel_command_id(PanelKind::Timeline), json!({})).unwrap();
+    let back = app.ui.floating.iter().find(|g| g.panels.contains(&PanelKind::Timeline)).expect("the Timeline floats again");
+    assert_eq!(back.rect, rect);
+    assert!(!app.ui.dock.contains(PanelKind::Timeline));
+
+    // with nothing else docked, a reopened panel has to stay docked (the workspace keeps one
+    // docked panel); its floating place is kept, not lost (#2482 review)
+    let mut app = FilmcraftApp::new(Session::default());
+    menus::invoke(&mut app, &ctx, "window.floatPanel", json!({"panel": "Info", "rect": [45, 65, 420, 320]})).unwrap();
+    let rect = app.ui.floating.iter().find(|g| g.panels.contains(&PanelKind::Info)).unwrap().rect;
+    for _ in 0..64 {
+        let Some(p) = PanelKind::ALL.iter().copied().find(|p| app.ui.dock.contains(*p)) else { break };
+        if menus::invoke(&mut app, &ctx, "window.closePanel", json!({"panel": p.id()})).is_err() {
+            break;
+        }
+    }
+    let docked = PanelKind::ALL.iter().filter(|p| app.ui.dock.contains(**p)).count();
+    if docked > 0 {
+        eprintln!("SKIPPED: the dock cannot be emptied ({docked} panels stay)");
+        return;
+    }
+    menus::invoke(&mut app, &ctx, "window.closePanel", json!({"panel": "Info"})).unwrap();
+    menus::invoke(&mut app, &ctx, &menus::panel_command_id(PanelKind::Info), json!({})).unwrap();
+    assert!(app.ui.dock.contains(PanelKind::Info), "the only panel stays docked");
+    assert!(app.ui.closed_floating.iter().any(|(p, r)| *p == PanelKind::Info && *r == rect), "{:?}", app.ui.closed_floating);
 }
