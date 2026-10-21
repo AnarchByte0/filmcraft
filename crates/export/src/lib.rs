@@ -1740,7 +1740,7 @@ impl VideoEncoder for Av1Encoder {
     fn sample_entry(&self) -> SampleEntry {
         let av1c = filmcraft_isobmff::Av1Config {
             seq_profile: 0,
-            seq_level_idx_0: 8,
+            seq_level_idx_0: self.enc.seq_level_idx(),
             seq_tier_0: false,
             high_bitdepth: false,
             twelve_bit: false,

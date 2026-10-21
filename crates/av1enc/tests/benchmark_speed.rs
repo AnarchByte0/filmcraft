@@ -4,6 +4,7 @@ use filmcraft_av1enc::{Encoder, EncoderConfig, Preset, RateControl, YuvFrame};
 use std::time::Instant;
 
 #[test]
+#[ignore = "performance benchmark"]
 fn bench_av1_speed_and_fps() {
     let resolutions = [("720p", 1280u32, 720u32, 50), ("1080p", 1920u32, 1080u32, 30), ("4K", 3840u32, 2160u32, 10)];
 

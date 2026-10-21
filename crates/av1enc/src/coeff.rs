@@ -36,7 +36,8 @@ pub fn map_eob_to_syntax(eob: usize) -> (usize, Option<usize>, u32, usize) {
 #[inline(always)]
 pub fn find_eob_4x4(quant: &[i16; 16]) -> usize {
     for i in (0..16).rev() {
-        if quant[SCAN_4X4[i]] != 0 {
+        let idx = SCAN_4X4.get(i).copied().unwrap_or(0);
+        if quant.get(idx).copied().unwrap_or(0) != 0 {
             return i + 1;
         }
     }
@@ -180,7 +181,10 @@ pub fn encode_dc_residual(
 
     // 5. dc_sign: symbol 1 if negative, 0 if positive
     let ptype = (plane > 0) as usize;
-    let sign_cdf = &tables::DEFAULT_DC_SIGN_CDF_ALL[ptype][dc_sign_ctx.min(2)];
+    let sign_cdf = tables::DEFAULT_DC_SIGN_CDF_ALL
+        .get(ptype)
+        .and_then(|p| p.get(dc_sign_ctx.min(2)))
+        .unwrap_or(&tables::DEFAULT_DC_SIGN_CDF_ALL[0][0]);
     sym.write_symbol_no_update(if is_negative { 1 } else { 0 }, sign_cdf);
 
     // 6. Exp-Golomb escape if level > NUM_BASE_LEVELS + COEFF_BASE_RANGE (14)

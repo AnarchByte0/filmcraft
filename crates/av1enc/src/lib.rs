@@ -199,6 +199,10 @@ impl Encoder {
         &self.config
     }
 
+    pub fn seq_level_idx(&self) -> u8 {
+        if self.config.width > 1920 || self.config.height > 1080 { 12 } else { 8 }
+    }
+
     pub fn sequence_header_obu(&self) -> Vec<u8> {
         let seq_cfg = obu::SequenceConfig {
             width: self.config.width,
@@ -602,16 +606,16 @@ fn encode_partition(ctx: &mut TileEncodeCtx<'_, '_>, r: usize, c: usize, bsl: us
     if has_rows && has_cols {
         let sym_val = if do_split { tables::PARTITION_SPLIT } else { tables::PARTITION_NONE };
         match bsl {
-            4 => ctx.sym.write_symbol_no_update(sym_val, &tables::DEFAULT_PARTITION_W64_CDF[part_ctx]),
-            3 => ctx.sym.write_symbol_no_update(sym_val, &tables::DEFAULT_PARTITION_W32_CDF[part_ctx]),
-            2 => ctx.sym.write_symbol_no_update(sym_val, &tables::DEFAULT_PARTITION_W16_CDF[part_ctx]),
-            _ => ctx.sym.write_symbol_no_update(sym_val, &tables::DEFAULT_PARTITION_W8_CDF[part_ctx]),
+            4 => ctx.sym.write_symbol_no_update(sym_val, tables::DEFAULT_PARTITION_W64_CDF.get(part_ctx).unwrap_or(&tables::DEFAULT_PARTITION_W64_CDF[0])),
+            3 => ctx.sym.write_symbol_no_update(sym_val, tables::DEFAULT_PARTITION_W32_CDF.get(part_ctx).unwrap_or(&tables::DEFAULT_PARTITION_W32_CDF[0])),
+            2 => ctx.sym.write_symbol_no_update(sym_val, tables::DEFAULT_PARTITION_W16_CDF.get(part_ctx).unwrap_or(&tables::DEFAULT_PARTITION_W16_CDF[0])),
+            _ => ctx.sym.write_symbol_no_update(sym_val, tables::DEFAULT_PARTITION_W8_CDF.get(part_ctx).unwrap_or(&tables::DEFAULT_PARTITION_W8_CDF[0])),
         }
     } else if has_cols || has_rows {
         let pcdf: &[u16] = match bsl {
-            4 => &tables::DEFAULT_PARTITION_W64_CDF[part_ctx],
-            3 => &tables::DEFAULT_PARTITION_W32_CDF[part_ctx],
-            _ => &tables::DEFAULT_PARTITION_W16_CDF[part_ctx],
+            4 => tables::DEFAULT_PARTITION_W64_CDF.get(part_ctx).unwrap_or(&tables::DEFAULT_PARTITION_W64_CDF[0]),
+            3 => tables::DEFAULT_PARTITION_W32_CDF.get(part_ctx).unwrap_or(&tables::DEFAULT_PARTITION_W32_CDF[0]),
+            _ => tables::DEFAULT_PARTITION_W16_CDF.get(part_ctx).unwrap_or(&tables::DEFAULT_PARTITION_W16_CDF[0]),
         };
         write_split_bool(ctx.sym, pcdf, has_cols);
     }
@@ -712,7 +716,7 @@ fn encode_block(ctx: &mut TileEncodeCtx<'_, '_>, r: usize, c: usize, bsl: usize,
     };
 
     if !ctx.is_key && is_inter {
-        ctx.sym.write_symbol_no_update(1, &tables::DEFAULT_SKIP_CDF[skip_ctx]);
+        ctx.sym.write_symbol_no_update(1, tables::DEFAULT_SKIP_CDF.get(skip_ctx).unwrap_or(&tables::DEFAULT_SKIP_CDF[0]));
 
         let above_intra = if avail_u { ctx.grid_ref_frame.get((r - 1) * ctx.mi_cols + c).copied().unwrap_or(0) == 0 } else { true };
         let left_intra = if avail_l { ctx.grid_ref_frame.get(r * ctx.mi_cols + c - 1).copied().unwrap_or(0) == 0 } else { true };
@@ -723,7 +727,7 @@ fn encode_block(ctx: &mut TileEncodeCtx<'_, '_>, r: usize, c: usize, bsl: usize,
         } else {
             0
         };
-        ctx.sym.write_symbol_no_update(1, &tables::DEFAULT_IS_INTER_CDF[is_inter_ctx]);
+        ctx.sym.write_symbol_no_update(1, tables::DEFAULT_IS_INTER_CDF.get(is_inter_ctx).unwrap_or(&tables::DEFAULT_IS_INTER_CDF[0]));
 
         let count_last = {
             let mut cnt = 0;
@@ -736,17 +740,18 @@ fn encode_block(ctx: &mut TileEncodeCtx<'_, '_>, r: usize, c: usize, bsl: usize,
             cnt
         };
         let ref_ctx = if count_last > 0 { 2 } else { 1 };
-        ctx.sym.write_symbol_no_update(0, &tables::DEFAULT_SINGLE_REF_CDF[ref_ctx][0]);
-        ctx.sym.write_symbol_no_update(0, &tables::DEFAULT_SINGLE_REF_CDF[ref_ctx][2]);
-        ctx.sym.write_symbol_no_update(0, &tables::DEFAULT_SINGLE_REF_CDF[ref_ctx][3]);
+        let single_ref = tables::DEFAULT_SINGLE_REF_CDF.get(ref_ctx).unwrap_or(&tables::DEFAULT_SINGLE_REF_CDF[0]);
+        ctx.sym.write_symbol_no_update(0, single_ref.first().unwrap_or(&single_ref[0]));
+        ctx.sym.write_symbol_no_update(0, single_ref.get(2).unwrap_or(&single_ref[0]));
+        ctx.sym.write_symbol_no_update(0, single_ref.get(3).unwrap_or(&single_ref[0]));
 
         let new_mv_ctx = match count_last {
             0 => 0,
             1 => 3,
             _ => 5,
         };
-        ctx.sym.write_symbol_no_update(1, &tables::DEFAULT_NEW_MV_CDF[new_mv_ctx]);
-        ctx.sym.write_symbol_no_update(0, &tables::DEFAULT_ZERO_MV_CDF[0]);
+        ctx.sym.write_symbol_no_update(1, tables::DEFAULT_NEW_MV_CDF.get(new_mv_ctx).unwrap_or(&tables::DEFAULT_NEW_MV_CDF[0]));
+        ctx.sym.write_symbol_no_update(0, tables::DEFAULT_ZERO_MV_CDF.first().unwrap_or(&tables::DEFAULT_ZERO_MV_CDF[0]));
 
         copy_block(ctx.ref_y, ctx.width, ctx.recon_y, ctx.width, x0, y0, block_w, block_h);
         copy_block(ctx.ref_u, ctx.uv_width, ctx.recon_u, ctx.uv_width, x0 / 2, y0 / 2, (block_w / 2).max(1), (block_h / 2).max(1));
@@ -902,8 +907,12 @@ fn encode_block(ctx: &mut TileEncodeCtx<'_, '_>, r: usize, c: usize, bsl: usize,
     };
 
     if ctx.is_key {
-        ctx.sym.write_symbol_no_update(if has_residual { 0 } else { 1 }, &tables::DEFAULT_SKIP_CDF[skip_ctx]);
-        ctx.sym.write_symbol_no_update(y_mode as usize, &tables::DEFAULT_INTRA_FRAME_Y_MODE_CDF[actx][lctx]);
+        ctx.sym.write_symbol_no_update(if has_residual { 0 } else { 1 }, tables::DEFAULT_SKIP_CDF.get(skip_ctx).unwrap_or(&tables::DEFAULT_SKIP_CDF[0]));
+        let intra_y_cdf = tables::DEFAULT_INTRA_FRAME_Y_MODE_CDF
+            .get(actx)
+            .and_then(|a| a.get(lctx))
+            .unwrap_or(&tables::DEFAULT_INTRA_FRAME_Y_MODE_CDF[0][0]);
+        ctx.sym.write_symbol_no_update(y_mode as usize, intra_y_cdf);
     } else {
         let above_intra = if avail_u { ctx.grid_ref_frame.get((r - 1) * ctx.mi_cols + c).copied().unwrap_or(0) == 0 } else { true };
         let left_intra = if avail_l { ctx.grid_ref_frame.get(r * ctx.mi_cols + c - 1).copied().unwrap_or(0) == 0 } else { true };
@@ -914,23 +923,25 @@ fn encode_block(ctx: &mut TileEncodeCtx<'_, '_>, r: usize, c: usize, bsl: usize,
         } else {
             0
         };
-        ctx.sym.write_symbol_no_update(if has_residual { 0 } else { 1 }, &tables::DEFAULT_SKIP_CDF[skip_ctx]);
-        ctx.sym.write_symbol_no_update(0, &tables::DEFAULT_IS_INTER_CDF[is_inter_ctx]);
-        ctx.sym.write_symbol_no_update(y_mode as usize, &tables::DEFAULT_Y_MODE_CDF[size_grp]);
+        ctx.sym.write_symbol_no_update(if has_residual { 0 } else { 1 }, tables::DEFAULT_SKIP_CDF.get(skip_ctx).unwrap_or(&tables::DEFAULT_SKIP_CDF[0]));
+        ctx.sym.write_symbol_no_update(0, tables::DEFAULT_IS_INTER_CDF.get(is_inter_ctx).unwrap_or(&tables::DEFAULT_IS_INTER_CDF[0]));
+        ctx.sym.write_symbol_no_update(y_mode as usize, tables::DEFAULT_Y_MODE_CDF.get(size_grp).unwrap_or(&tables::DEFAULT_Y_MODE_CDF[0]));
     }
 
     if y_mode == intra::V_PRED || y_mode == intra::H_PRED {
-        ctx.sym.write_symbol_no_update(3, &tables::DEFAULT_ANGLE_DELTA_CDF[y_mode as usize - 1]);
+        let delta_idx = (y_mode as usize).saturating_sub(1);
+        ctx.sym.write_symbol_no_update(3, tables::DEFAULT_ANGLE_DELTA_CDF.get(delta_idx).unwrap_or(&tables::DEFAULT_ANGLE_DELTA_CDF[0]));
     }
 
     if cfl_allowed {
-        ctx.sym.write_symbol_no_update(uv_mode as usize, &tables::DEFAULT_UV_MODE_CFL_ALLOWED_CDF[y_mode as usize]);
+        ctx.sym.write_symbol_no_update(uv_mode as usize, tables::DEFAULT_UV_MODE_CFL_ALLOWED_CDF.get(y_mode as usize).unwrap_or(&tables::DEFAULT_UV_MODE_CFL_ALLOWED_CDF[0]));
     } else {
-        ctx.sym.write_symbol_no_update(uv_mode as usize, &tables::DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF[y_mode as usize]);
+        ctx.sym.write_symbol_no_update(uv_mode as usize, tables::DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF.get(y_mode as usize).unwrap_or(&tables::DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF[0]));
     }
 
     if uv_mode == intra::V_PRED || uv_mode == intra::H_PRED {
-        ctx.sym.write_symbol_no_update(3, &tables::DEFAULT_ANGLE_DELTA_CDF[uv_mode as usize - 1]);
+        let delta_idx = (uv_mode as usize).saturating_sub(1);
+        ctx.sym.write_symbol_no_update(3, tables::DEFAULT_ANGLE_DELTA_CDF.get(delta_idx).unwrap_or(&tables::DEFAULT_ANGLE_DELTA_CDF[0]));
     }
 
     let uv_w4 = (bw4 / 2).max(1);
