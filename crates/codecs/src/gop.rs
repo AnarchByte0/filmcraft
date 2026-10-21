@@ -250,9 +250,13 @@ const IDLE: Duration = Duration::from_secs(3);
 /// and hundreds of MB of frames per clip.
 const RECENT: Duration = Duration::from_millis(500);
 
+/// Most decoders caches idle for [RECENT] to [IDLE] keep together (a composite of a few
+/// layers plus the clips just left behind).
 const HARD_DECODERS: usize = 8;
 
-/// Base decoded frames all caches may hold together before idle ones give theirs up.
+/// Base decoded frames all caches may hold together before idle ones give theirs up. Each cache also
+/// has its own budget, which alone let every clip on a timeline keep hundreds of MB of frames
+/// nobody was looking at.
 pub const FRAME_BUDGET: usize = 1 << 30;
 
 static GLOBAL_BUDGET: AtomicUsize = AtomicUsize::new(FRAME_BUDGET);
@@ -263,9 +267,11 @@ pub fn clamp_frame_budgets(bytes: usize) -> (usize, usize) {
     let min_pool = 256 << 20;
     let max_pool = (4u64 << 30).min(usize::MAX as u64) as usize;
     let pool = bytes.clamp(min_pool, max_pool);
-    // Keep per-stream budget proportional (~3/8 of pool, min 96MB, max 1.5GB)
-    let max_cache = (1536u64 << 20).min(usize::MAX as u64) as usize;
-    let per_cache = (pool * 3 / 8).clamp(96 << 20, max_cache);
+    // Maintain standard per-stream cache budget at 384 MiB base (clamped up to 3/8 of pool)
+    // using 64-bit arithmetic to prevent overflow on 32-bit targets.
+    let per_cache_calc = ((pool as u64).saturating_mul(3) / 8).min(usize::MAX as u64) as usize;
+    let max_cache = (384u64 << 20).min(usize::MAX as u64) as usize;
+    let per_cache = per_cache_calc.clamp(96 << 20, max_cache);
     (pool, per_cache)
 }
 
