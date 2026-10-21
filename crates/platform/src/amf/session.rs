@@ -149,7 +149,7 @@ impl Session {
                     set(component, windows::core::w!("HevcGOPSize").as_ptr(), AmfVariant::int64(i64::from(cfg.keyint.max(1))));
                     if ten_bit {
                         set(component, windows::core::w!("HevcColorBitDepth").as_ptr(), AmfVariant::int64(10));
-                        set(component, windows::core::w!("HevcNominalRange").as_ptr(), AmfVariant::int64(1));
+                        set(component, windows::core::w!("HevcNominalRange").as_ptr(), AmfVariant::int64(0));
                     }
                 }
                 Codec::Av1 => {

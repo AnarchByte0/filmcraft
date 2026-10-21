@@ -10,7 +10,7 @@ use super::{Codec, Config, Profile, Session};
 
 pub fn factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
     let codec = match format {
-        Format::H264 if s.hardware_encoding == HardwareEncoding::Auto => Codec::H264,
+        Format::H264 if s.hardware_encoding == HardwareEncoding::Auto && !s.signal.is_hdr() => Codec::H264,
         Format::Hevc => Codec::Hevc,
         Format::Av1 => Codec::Av1,
         _ => return None,

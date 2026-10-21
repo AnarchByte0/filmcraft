@@ -73,13 +73,6 @@ pub fn register() -> Availability {
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     {
         filmcraft_export::register_encoder(nvenc::export::factory);
-        filmcraft_export::register_encoder(amf::export::factory);
-        filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, amf::hevc_available);
-        filmcraft_export::register_format_probe(filmcraft_export::Format::Av1, amf::av1_available);
-        filmcraft_export::register_hdr_probe(filmcraft_export::Format::Hevc, amf::hevc_hdr_available);
-        filmcraft_export::register_hdr_probe(filmcraft_export::Format::Av1, amf::av1_hdr_available);
-        amf::warm_hevc_probe();
-        amf::warm_av1_probe();
     }
     #[cfg(target_os = "macos")]
     {

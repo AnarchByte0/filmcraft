@@ -36,9 +36,9 @@ pub const AMF_DX11_1: u32 = 111;
 pub const AMF_VARIANT_BOOL: i32 = 1;
 pub const AMF_VARIANT_INT64: i32 = 2;
 pub const AMF_VARIANT_DOUBLE: i32 = 3;
-pub const AMF_VARIANT_SIZE: i32 = 5;
-pub const AMF_VARIANT_RATE: i32 = 9;
-pub const AMF_VARIANT_RATIO: i32 = 10;
+pub const AMF_VARIANT_SIZE: i32 = 6;
+pub const AMF_VARIANT_RATE: i32 = 7;
+pub const AMF_VARIANT_RATIO: i32 = 8;
 
 pub const AMD_VENDOR_ID: u32 = 0x1002;
 
@@ -362,6 +362,7 @@ fn load_runtime() -> Result<AmfRuntime, String> {
     // SAFETY: loads libamfrt64.so.1 securely from system library search path.
     let lib = unsafe { Library::new("libamfrt64.so.1").or_else(|_| Library::new("libamfrt64.so")) }.map_err(|e| format!("libamfrt64.so not available: {e}"))?;
 
+    // SAFETY: dereferencing function pointer symbol loaded from libamfrt64.
     let init_fn: AmfInitFn = unsafe {
         let sym = lib.get::<AmfInitFn>(b"AMFInit\0").map_err(|e| format!("AMFInit not found: {e}"))?;
         *sym
