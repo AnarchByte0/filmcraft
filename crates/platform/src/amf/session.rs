@@ -336,7 +336,7 @@ impl Session {
         }
     }
 
-    fn poll_output(&mut self) -> Result<(Vec<Packet>, bool), String> {
+    fn poll_output(&mut self, wait: bool) -> Result<(Vec<Packet>, bool), String> {
         let mut packets = Vec::new();
         let mut out_data: *mut c_void = std::ptr::null_mut();
         let mut repeats = 0;
@@ -358,6 +358,9 @@ impl Session {
                     ((*(*buf).vtbl).release)(buf);
                     out_data = std::ptr::null_mut();
                 } else if res == AMF_REPEAT {
+                    if !wait {
+                        break;
+                    }
                     repeats += 1;
                     if repeats > 20 {
                         break;
@@ -367,7 +370,7 @@ impl Session {
                     eof = true;
                     break;
                 } else {
-                    break;
+                    return Err(format!("AMF QueryOutput failed ({res})"));
                 }
             }
         }
@@ -375,7 +378,7 @@ impl Session {
     }
 
     fn query_packets(&mut self) -> Result<Vec<Packet>, String> {
-        self.poll_output().map(|(pkts, _)| pkts)
+        self.poll_output(false).map(|(pkts, _)| pkts)
     }
 
     pub fn drain(&mut self) -> Result<Vec<Packet>, String> {
@@ -390,7 +393,7 @@ impl Session {
         let mut packets = Vec::new();
         let start = Instant::now();
         loop {
-            let (chunk, eof) = self.poll_output()?;
+            let (chunk, eof) = self.poll_output(true)?;
             packets.extend(chunk);
             if eof || start.elapsed() > Duration::from_secs(5) {
                 break;
