@@ -121,54 +121,72 @@ impl Session {
             (Codec::Hevc | Codec::Av1, false) => 2,
         };
 
-        // SAFETY: setting properties on live AMFComponent before Init.
-        unsafe {
-            let set = (*(*component).vtbl).set_property;
-            match codec {
-                Codec::H264 => {
-                    let prof_val = match cfg.profile {
-                        Profile::H264Baseline => 66,
-                        Profile::H264Main => 77,
-                        _ => 100,
-                    };
-                    set(component, windows::core::w!("Usage").as_ptr(), AmfVariant::int64(0));
-                    set(component, windows::core::w!("Profile").as_ptr(), AmfVariant::int64(prof_val));
-                    set(component, windows::core::w!("FrameSize").as_ptr(), AmfVariant::size(w, h));
-                    set(component, windows::core::w!("FrameRate").as_ptr(), AmfVariant::rate(cfg.fps.0, cfg.fps.1));
-                    set(component, windows::core::w!("TargetBitrate").as_ptr(), AmfVariant::int64(target_bps));
-                    set(component, windows::core::w!("PeakBitrate").as_ptr(), AmfVariant::int64(peak_bps));
-                    set(component, windows::core::w!("RateControlMethod").as_ptr(), AmfVariant::int64(rate_control));
-                    set(component, windows::core::w!("GOPSize").as_ptr(), AmfVariant::int64(i64::from(cfg.keyint.max(1))));
-                }
-                Codec::Hevc => {
-                    let prof_val = if ten_bit { 2 } else { 1 };
-                    set(component, windows::core::w!("HevcUsage").as_ptr(), AmfVariant::int64(0));
-                    set(component, windows::core::w!("HevcProfile").as_ptr(), AmfVariant::int64(prof_val));
-                    set(component, windows::core::w!("HevcFrameSize").as_ptr(), AmfVariant::size(w, h));
-                    set(component, windows::core::w!("HevcFrameRate").as_ptr(), AmfVariant::rate(cfg.fps.0, cfg.fps.1));
-                    set(component, windows::core::w!("HevcTargetBitrate").as_ptr(), AmfVariant::int64(target_bps));
-                    set(component, windows::core::w!("HevcPeakBitrate").as_ptr(), AmfVariant::int64(peak_bps));
-                    set(component, windows::core::w!("HevcRateControlMethod").as_ptr(), AmfVariant::int64(rate_control));
-                    set(component, windows::core::w!("HevcGOPSize").as_ptr(), AmfVariant::int64(i64::from(cfg.keyint.max(1))));
-                    if ten_bit {
-                        set(component, windows::core::w!("HevcColorBitDepth").as_ptr(), AmfVariant::int64(10));
-                        set(component, windows::core::w!("HevcNominalRange").as_ptr(), AmfVariant::int64(0));
-                    }
-                }
-                Codec::Av1 => {
-                    set(component, windows::core::w!("Av1Usage").as_ptr(), AmfVariant::int64(0));
-                    set(component, windows::core::w!("Av1Profile").as_ptr(), AmfVariant::int64(1));
-                    set(component, windows::core::w!("Av1FrameSize").as_ptr(), AmfVariant::size(w, h));
-                    set(component, windows::core::w!("Av1FrameRate").as_ptr(), AmfVariant::rate(cfg.fps.0, cfg.fps.1));
-                    set(component, windows::core::w!("Av1TargetBitrate").as_ptr(), AmfVariant::int64(target_bps));
-                    set(component, windows::core::w!("Av1PeakBitrate").as_ptr(), AmfVariant::int64(peak_bps));
-                    set(component, windows::core::w!("Av1RateControlMethod").as_ptr(), AmfVariant::int64(rate_control));
-                    set(component, windows::core::w!("Av1GOPSize").as_ptr(), AmfVariant::int64(i64::from(cfg.keyint.max(1))));
-                    if ten_bit {
-                        set(component, windows::core::w!("Av1ColorBitDepth").as_ptr(), AmfVariant::int64(10));
-                    }
+        let mut prop_res = AMF_OK;
+        let mut set = |name: *const u16, val: AmfVariant| {
+            if prop_res == AMF_OK {
+                // SAFETY: setting property on live AMFComponent before Init.
+                let r = unsafe { ((*(*component).vtbl).set_property)(component, name, val) };
+                if r != AMF_OK {
+                    prop_res = r;
                 }
             }
+        };
+
+        match codec {
+            Codec::H264 => {
+                let prof_val = match cfg.profile {
+                    Profile::H264Baseline => 66,
+                    Profile::H264Main => 77,
+                    _ => 100,
+                };
+                set(windows::core::w!("Usage").as_ptr(), AmfVariant::int64(0));
+                set(windows::core::w!("Profile").as_ptr(), AmfVariant::int64(prof_val));
+                set(windows::core::w!("FrameSize").as_ptr(), AmfVariant::size(w, h));
+                set(windows::core::w!("FrameRate").as_ptr(), AmfVariant::rate(cfg.fps.0, cfg.fps.1));
+                set(windows::core::w!("TargetBitrate").as_ptr(), AmfVariant::int64(target_bps));
+                set(windows::core::w!("PeakBitrate").as_ptr(), AmfVariant::int64(peak_bps));
+                set(windows::core::w!("RateControlMethod").as_ptr(), AmfVariant::int64(rate_control));
+                set(windows::core::w!("GOPSize").as_ptr(), AmfVariant::int64(i64::from(cfg.keyint.max(1))));
+            }
+            Codec::Hevc => {
+                let prof_val = if ten_bit { 2 } else { 1 };
+                set(windows::core::w!("HevcUsage").as_ptr(), AmfVariant::int64(0));
+                set(windows::core::w!("HevcProfile").as_ptr(), AmfVariant::int64(prof_val));
+                set(windows::core::w!("HevcFrameSize").as_ptr(), AmfVariant::size(w, h));
+                set(windows::core::w!("HevcFrameRate").as_ptr(), AmfVariant::rate(cfg.fps.0, cfg.fps.1));
+                set(windows::core::w!("HevcTargetBitrate").as_ptr(), AmfVariant::int64(target_bps));
+                set(windows::core::w!("HevcPeakBitrate").as_ptr(), AmfVariant::int64(peak_bps));
+                set(windows::core::w!("HevcRateControlMethod").as_ptr(), AmfVariant::int64(rate_control));
+                set(windows::core::w!("HevcGOPSize").as_ptr(), AmfVariant::int64(i64::from(cfg.keyint.max(1))));
+                if ten_bit {
+                    set(windows::core::w!("HevcColorBitDepth").as_ptr(), AmfVariant::int64(10));
+                    set(windows::core::w!("HevcNominalRange").as_ptr(), AmfVariant::int64(0));
+                }
+            }
+            Codec::Av1 => {
+                set(windows::core::w!("Av1Usage").as_ptr(), AmfVariant::int64(0));
+                set(windows::core::w!("Av1Profile").as_ptr(), AmfVariant::int64(1));
+                set(windows::core::w!("Av1FrameSize").as_ptr(), AmfVariant::size(w, h));
+                set(windows::core::w!("Av1FrameRate").as_ptr(), AmfVariant::rate(cfg.fps.0, cfg.fps.1));
+                set(windows::core::w!("Av1TargetBitrate").as_ptr(), AmfVariant::int64(target_bps));
+                set(windows::core::w!("Av1PeakBitrate").as_ptr(), AmfVariant::int64(peak_bps));
+                set(windows::core::w!("Av1RateControlMethod").as_ptr(), AmfVariant::int64(rate_control));
+                set(windows::core::w!("Av1GOPSize").as_ptr(), AmfVariant::int64(i64::from(cfg.keyint.max(1))));
+                if ten_bit {
+                    set(windows::core::w!("Av1ColorBitDepth").as_ptr(), AmfVariant::int64(10));
+                }
+            }
+        }
+
+        if prop_res != AMF_OK {
+            // SAFETY: terminating and releasing component and context on property configuration failure.
+            unsafe {
+                ((*(*component).vtbl).terminate)(component);
+                ((*(*component).vtbl).release)(component);
+                ((*(*context).vtbl).terminate)(context);
+                ((*(*context).vtbl).release)(context);
+            }
+            return Err(format!("AMF SetProperty failed ({prop_res})"));
         }
 
         let surface_format = if ten_bit { AMF_SURFACE_P010 } else { AMF_SURFACE_NV12 };
@@ -318,45 +336,18 @@ impl Session {
         }
     }
 
-    fn query_packets(&mut self) -> Result<Vec<Packet>, String> {
+    fn poll_output(&mut self) -> Result<(Vec<Packet>, bool), String> {
         let mut packets = Vec::new();
         let mut out_data: *mut c_void = std::ptr::null_mut();
+        let mut repeats = 0;
+        let mut eof = false;
+
         // SAFETY: polling QueryOutput for ready buffers.
         unsafe {
             loop {
                 let res = ((*(*self.component).vtbl).query_output)(self.component, &mut out_data);
                 if res == AMF_OK && !out_data.is_null() {
-                    let buf = out_data as *mut AmfBuffer;
-                    let size = ((*(*buf).vtbl).get_size)(buf);
-                    let ptr = ((*(*buf).vtbl).get_native)(buf);
-                    let pts = ((*(*buf).vtbl).get_pts)(buf);
-                    let slice = std::slice::from_raw_parts(ptr, size);
-                    let is_key = self.check_output_buffer_keyframe(buf, slice);
-                    packets.push(Packet { data: slice.to_vec(), key: is_key, pts, dts: pts });
-                    ((*(*buf).vtbl).release)(buf);
-                    out_data = std::ptr::null_mut();
-                } else {
-                    break;
-                }
-            }
-        }
-        Ok(packets)
-    }
-
-    pub fn drain(&mut self) -> Result<Vec<Packet>, String> {
-        let mut packets = Vec::new();
-        // SAFETY: draining the encoder component and polling until AMF_EOF.
-        unsafe {
-            let res = ((*(*self.component).vtbl).drain)(self.component);
-            if res != AMF_OK {
-                return Err(format!("AMF Drain failed ({res})"));
-            }
-
-            let mut out_data: *mut c_void = std::ptr::null_mut();
-            let start = Instant::now();
-            loop {
-                let res = ((*(*self.component).vtbl).query_output)(self.component, &mut out_data);
-                if res == AMF_OK && !out_data.is_null() {
+                    repeats = 0;
                     let buf = out_data as *mut AmfBuffer;
                     let size = ((*(*buf).vtbl).get_size)(buf);
                     let ptr = ((*(*buf).vtbl).get_native)(buf);
@@ -367,14 +358,44 @@ impl Session {
                     ((*(*buf).vtbl).release)(buf);
                     out_data = std::ptr::null_mut();
                 } else if res == AMF_REPEAT {
-                    std::thread::sleep(Duration::from_millis(2));
-                    if start.elapsed() > Duration::from_secs(5) {
+                    repeats += 1;
+                    if repeats > 20 {
                         break;
                     }
+                    std::thread::sleep(Duration::from_millis(1));
+                } else if res == AMF_EOF {
+                    eof = true;
+                    break;
                 } else {
                     break;
                 }
             }
+        }
+        Ok((packets, eof))
+    }
+
+    fn query_packets(&mut self) -> Result<Vec<Packet>, String> {
+        self.poll_output().map(|(pkts, _)| pkts)
+    }
+
+    pub fn drain(&mut self) -> Result<Vec<Packet>, String> {
+        // SAFETY: draining the encoder component and polling until AMF_EOF.
+        unsafe {
+            let res = ((*(*self.component).vtbl).drain)(self.component);
+            if res != AMF_OK {
+                return Err(format!("AMF Drain failed ({res})"));
+            }
+        }
+
+        let mut packets = Vec::new();
+        let start = Instant::now();
+        loop {
+            let (chunk, eof) = self.poll_output()?;
+            packets.extend(chunk);
+            if eof || start.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
         Ok(packets)
     }
