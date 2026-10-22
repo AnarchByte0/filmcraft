@@ -3,7 +3,6 @@
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
-use super::device::Device;
 use super::ffi::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +56,6 @@ pub struct Packet {
 }
 
 pub struct Session {
-    _device: Device,
     context: *mut AmfContext,
     component: *mut AmfComponent,
     codec: Codec,
@@ -73,7 +71,6 @@ impl Session {
     pub fn open(cfg: &Config) -> Result<Self, String> {
         let rt = runtime()?;
         let factory = rt.factory();
-        let device = Device::new()?;
 
         let mut context: *mut AmfContext = std::ptr::null_mut();
         // SAFETY: calling AMFFactory::CreateContext with live out-pointer.
@@ -84,8 +81,9 @@ impl Session {
 
         #[cfg(target_os = "windows")]
         {
-            // SAFETY: calling AMFContext::InitDX11 with D3D11 device.
-            let res = unsafe { ((*(*context).vtbl).init_dx11)(context, device.as_raw(), AMF_DX11_1) };
+            // SAFETY: calling AMFContext::InitDX11 with NULL pointer; AMF internally selects an AMD adapter,
+            // verifies GPU support, and initializes the Direct3D 11 device.
+            let res = unsafe { ((*(*context).vtbl).init_dx11)(context, std::ptr::null_mut(), AMF_DX11_1) };
             if res != AMF_OK {
                 // SAFETY: releasing context on initialization failure.
                 unsafe { ((*(*context).vtbl).release)(context) };
@@ -187,7 +185,7 @@ impl Session {
             return Err(format!("AMF Component Init failed ({res})"));
         }
 
-        Ok(Session { _device: device, context, component, codec, ten_bit, width: cfg.width, height: cfg.height })
+        Ok(Session { context, component, codec, ten_bit, width: cfg.width, height: cfg.height })
     }
 
     pub fn codec(&self) -> Codec {
