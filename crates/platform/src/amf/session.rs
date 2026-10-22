@@ -229,29 +229,9 @@ impl Session {
                     *dst.add(i * 2 + 1) = v_val;
                 }
             }
-
-            ((*(*surface).vtbl).set_pts)(surface, pts);
-            ((*(*surface).vtbl).set_duration)(surface, duration);
-
-            let mut res = ((*(*self.component).vtbl).submit_input)(self.component, surface as *mut c_void);
-            let mut backlog = Vec::new();
-            if res == AMF_INPUT_FULL {
-                let start = Instant::now();
-                while res == AMF_INPUT_FULL && start.elapsed() < Duration::from_millis(500) {
-                    let mut more = self.query_packets()?;
-                    backlog.append(&mut more);
-                    std::thread::sleep(Duration::from_millis(1));
-                    res = ((*(*self.component).vtbl).submit_input)(self.component, surface as *mut c_void);
-                }
-            }
-            ((*(*surface).vtbl).release)(surface);
-            if res != AMF_OK {
-                return Err(format!("AMF SubmitInput failed ({res})"));
-            }
-            let mut packets = backlog;
-            packets.extend(self.query_packets()?);
-            Ok(packets)
         }
+
+        self.submit_surface(surface, pts, duration)
     }
 
     pub fn encode_10bit(&mut self, y: &[u16], u: &[u16], v: &[u16], pts: i64, duration: i64) -> Result<Vec<Packet>, String> {
@@ -290,7 +270,14 @@ impl Session {
                     *dst.add(c * 2 + 1) = (v_val & 0x3ff) << 6;
                 }
             }
+        }
 
+        self.submit_surface(surface, pts, duration)
+    }
+
+    fn submit_surface(&mut self, surface: *mut AmfSurface, pts: i64, duration: i64) -> Result<Vec<Packet>, String> {
+        // SAFETY: surface is a valid live AmfSurface.
+        unsafe {
             ((*(*surface).vtbl).set_pts)(surface, pts);
             ((*(*surface).vtbl).set_duration)(surface, duration);
 
@@ -307,7 +294,7 @@ impl Session {
             }
             ((*(*surface).vtbl).release)(surface);
             if res != AMF_OK {
-                return Err(format!("AMF SubmitInput P010 failed ({res})"));
+                return Err(format!("AMF SubmitInput failed ({res})"));
             }
             let mut packets = backlog;
             packets.extend(self.query_packets()?);
